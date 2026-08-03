@@ -1,0 +1,109 @@
+[importlinter]
+root_packages =
+    asip
+include_external_packages = True
+
+# The original single contract listed asip.modules.*.adapters as a layer.
+# import-linter's `layers` field takes module *tails*, not expressions, so the
+# wildcard was read as a literal package name, the contract failed to load with
+# "Missing layer", and `make layers` reported nothing. Wildcards are supported
+# in `containers`, which is what expresses "inside every module" — so the same
+# rule is split in two below. Verified against import-linter 2.13 / grimp 3.15.
+
+[importlinter:contract:layers]
+name = ASIP layer boundaries (L0-L4, inward only)
+type = layers
+layers =
+    asip.entrypoints
+    asip.modules
+    asip.contracts
+
+[importlinter:contract:module-layers]
+name = Inside every module: adapters -> application -> domain, inward only
+type = layers
+layers =
+    adapters
+    application
+    domain
+containers =
+    asip.modules.*
+# A module has exactly these three layers. A fourth package appearing beside
+# them is an architecture change and fails here rather than passing unnoticed.
+exhaustive = True
+
+[importlinter:contract:domain-purity]
+name = L1 domain is pure - no I/O libraries
+type = forbidden
+source_modules =
+    asip.modules.collection.domain
+    asip.modules.evidence.domain
+    asip.modules.extraction.domain
+    asip.modules.baseline.domain
+    asip.modules.detection.domain
+    asip.modules.review.domain
+    asip.modules.identity.domain
+    asip.modules.export.domain
+    asip.modules.reporting.domain
+forbidden_modules =
+    httpx
+    requests
+    asyncpg
+    psycopg
+    sqlalchemy
+    boto3
+    playwright
+    temporalio
+    redis
+    anthropic
+    openai
+
+[importlinter:contract:module-independence]
+name = Modules communicate only through published interfaces
+type = forbidden
+source_modules =
+    asip.modules.review
+    asip.modules.reporting
+    asip.modules.export
+forbidden_modules =
+    asip.modules.detection.adapters
+    asip.modules.detection.application
+    asip.modules.collection.adapters
+    asip.modules.evidence.adapters
+
+[importlinter:contract:pairwise-independence]
+name = Every module is independently removable (D-99)
+type = independence
+modules =
+    asip.modules.collection
+    asip.modules.evidence
+    asip.modules.extraction
+    asip.modules.baseline
+    asip.modules.detection
+    asip.modules.review
+    asip.modules.identity
+    asip.modules.export
+    asip.modules.reporting
+
+[importlinter:contract:composition-root]
+name = Only the composition root imports concrete adapters (D-98)
+type = forbidden
+source_modules =
+    asip.modules.collection.application
+    asip.modules.evidence.application
+    asip.modules.extraction.application
+    asip.modules.baseline.application
+    asip.modules.detection.application
+    asip.modules.review.application
+    asip.modules.identity.application
+    asip.modules.export.application
+    asip.modules.reporting.application
+forbidden_modules =
+    asip.modules.collection.adapters
+    asip.modules.evidence.adapters
+    asip.modules.extraction.adapters
+    asip.modules.baseline.adapters
+    asip.modules.detection.adapters
+    asip.modules.review.adapters
+    asip.modules.identity.adapters
+    asip.modules.export.adapters
+    asip.modules.reporting.adapters

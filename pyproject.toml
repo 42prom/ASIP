@@ -1,0 +1,90 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "asip"
+version = "0.0.0"
+description = "AI Social Intelligence Platform — coordination detection with forensic-grade evidence"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "TBD" }
+
+# Runtime dependencies are deliberately empty. Nothing is built yet, and
+# pre-declaring FastAPI / Playwright / warcio would be adding dependencies
+# against an anticipated constraint rather than a measured one (CLAUDE.md §3).
+# They land with the code that needs them.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.6",
+  "mypy>=1.11",
+  "import-linter>=2.0",
+  "pytest>=8.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ruff
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E",    # pycodestyle errors
+  "F",    # pyflakes
+  "W",    # pycodestyle warnings
+  "I",    # isort
+  "UP",   # pyupgrade
+  "B",    # bugbear
+  "SIM",  # simplify
+  "C4",   # comprehensions
+  "RUF",  # ruff-specific
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["asip"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# mypy
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.12"
+files = ["src", "tests"]
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+
+# L1 domain is the layer that must never be loosened. It has no I/O, so there
+# is no third-party stub gap to excuse an Any. Strictest settings apply here
+# and are expected to stay applied.
+[[tool.mypy.overrides]]
+module = ["asip.modules.*.domain.*"]
+disallow_any_generics = true
+disallow_untyped_calls = true
+disallow_incomplete_defs = true
+warn_return_any = true
+no_implicit_reexport = true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pytest — the four mandatory test layers of D-88
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config -ra"
+markers = [
+  "fixtures: extractor golden-file suite (D-88.1) — never run filtered",
+  "evidence: evidence integrity round-trip (D-88.2)",
+  "rules: rule engine unit tests against synthetic ground truth (D-88.3)",
+  "isolation: cross-tenant read attempts, must be rejected by RLS (D-88.4)",
+  "contracts: consumer-driven contract tests (D-97)",
+  "local_only: depends on an unsanitizable T3 fixture (R-04) — excluded from CI",
+]

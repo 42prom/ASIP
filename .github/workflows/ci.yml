@@ -1,0 +1,78 @@
+name: CI
+
+# D-114 gates. On every push: lint, layers, test, test-contracts,
+# test-independence.
+#
+# The PR-merge gates (test-isolation, validate-stix, test-fixtures) and the
+# nightly gates (verify-chain over full history, corpus regression across all
+# rules) are not wired yet: their Makefile targets exit 1 because the code
+# they gate does not exist. Wiring them now would leave CI permanently red,
+# which teaches everyone to ignore it. They land with their targets, in
+# Phase 1 and Phase 3. This omission is deliberate and tracked, not forgotten.
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # `make install` builds the same .venv a developer has, so the gates
+      # below run through an identical toolchain path in both places.
+      - name: Install
+        run: make install
+
+      # Runs the same Makefile targets a developer runs locally. Two
+      # definitions of "the gate passes" is one too many.
+      - name: lint
+        run: make lint
+
+      - name: layers
+        run: make layers
+
+      - name: test
+        run: make test
+
+      - name: test-contracts
+        run: make test-contracts
+
+      - name: test-independence
+        run: make test-independence
+
+  # The repository boundary, checked from inside the repository.
+  #
+  # .gitignore and .claude/hooks/guard_git_boundary.py are the first two
+  # lines, but both live in the private ops repo — a hook that is not in this
+  # repository cannot run in this repository's CI (R-01). This step is the
+  # third line, and the only one a fork or a fresh clone gets.
+  boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No T2 or T3 file is tracked
+        run: |
+          set -euo pipefail
+          pattern='^(CLAUDE\.md|\.claude/|docs/|phases/|spikes/|audits?/|reports/|evidence/|clients/|secrets/|data/(labeled|corpus|baselines)/|fixtures/raw/)|(^|/)(REPO_POLICY|FIRST_MESSAGE|MASTER_PLAN|ADDENDUM_V11|CONTRACTS|PACKAGE_README|LEARNINGS|CONTINGENCY|SECURITY_THREATS|RUNBOOKS|SPIKE_0|WALKING_SKELETON|COMMANDS|TEST_DATA|STIX_MAPPING\w*)\.md$|\.(warc|warc\.gz|pem|key)$|(^|/)\.env'
+          if git ls-files | grep -nE "$pattern"; then
+            echo "::error::Tracked files violate the repository boundary (docs/REPO_POLICY.md)."
+            echo "T2 (private ops repo): CLAUDE.md, .claude/, docs/, phases/"
+            echo "T3 (never committed anywhere): measurements, audits, labeled data,"
+            echo "evidence, client and pricing information."
+            echo "If a file genuinely belongs here it is in the wrong tier — report"
+            echo "that rather than relaxing the boundary (R-06)."
+            exit 1
+          fi
+          echo "Boundary clean."

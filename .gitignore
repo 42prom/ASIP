@@ -1,0 +1,83 @@
+# ═══════════════════════════════════════════════════════════════
+# ASIP — repository boundary. See docs/REPO_POLICY.md
+# T3: never committed to any remote, public or private.
+# ═══════════════════════════════════════════════════════════════
+
+# Working instructions and agent configuration (T2 — lives in ASIP-ops)
+/CLAUDE.md
+/.claude/
+/docs/
+/phases/
+
+# T2 documents that have appeared at the repository root before. The
+# directory rules above do not match a root-level copy, and neither did
+# guard_git_boundary.py, whose patterns are anchored to docs/ (F1, R-06).
+/REPO_POLICY.md
+/FIRST_MESSAGE.md
+/MASTER_PLAN.md
+/ADDENDUM_V11.md
+/CONTRACTS.md
+/PACKAGE_README.md
+/LEARNINGS.md
+/CONTINGENCY.md
+/SECURITY_THREATS.md
+/RUNBOOKS.md
+/SPIKE_0.md
+/WALKING_SKELETON.md
+/COMMANDS.md
+/TEST_DATA.md
+/STIX_MAPPING*.md
+
+# Measurements and audits — contain real cost and client data
+/spikes/
+/audits/
+/reports/
+*RESULTS.md
+*AUDIT*.md
+*GAP_REVIEW*.md
+
+# Labeled data and corpora — annotation is expensive and private
+/data/labeled/
+/data/corpus/
+/data/baselines/
+
+# Fixtures contain real scraped content — sanitized only, never raw
+/fixtures/raw/
+/fixtures/**/*.unsanitized.*
+
+# Evidence — never leaves the object store
+/evidence/
+*.warc
+*.warc.gz
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+secrets/
+credentials*
+
+# Client-identifying
+/clients/
+CLIENT*.md
+PRICING*.md
+
+# Standard
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+.pytest_cache/
+.ruff_cache/
+# mypy and grimp each drop a self-ignoring .gitignore into their cache. Listing
+# them here means the boundary does not depend on a third party continuing to.
+.mypy_cache/
+.import_linter_cache/
+dist/
+build/
+*.egg-info/
+.DS_Store
+.idea/
+.vscode/

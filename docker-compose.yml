@@ -1,0 +1,111 @@
+# ASIP local development stack. MASTER_PLAN §10.2.
+#
+# Four backing services. The application containers (api, worker) and the
+# observability stack (grafana, loki, prometheus) from §10.2 are deferred:
+# there is no application to run yet, and starting containers that do nothing
+# is a cost with no measured benefit (CLAUDE.md §3).
+#
+# The fetcher is deferred for a different and more important reason — see the
+# network note at the bottom of this file.
+#
+# Credentials here are local throwaways for a container that is destroyed with
+# `docker compose down -v`. Every real value lives in the secrets manager and
+# is never read by an agent (docs/COMMANDS.md). Ports bind to 127.0.0.1 only.
+
+name: asip
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-asip}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-asip_dev_only}
+      POSTGRES_DB: ${POSTGRES_DB:-asip}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-asip} -d ${POSTGRES_DB:-asip}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [core]
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [core]
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-asip}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-asip_dev_only}
+    ports:
+      - "127.0.0.1:9000:9000"   # S3 API
+      - "127.0.0.1:9001:9001"   # console
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [core]
+
+  # Temporal shares the Postgres instance rather than running its own. It
+  # creates its own databases (temporal, temporal_visibility) there, which is
+  # separate from ASIP's per-module schemas (D-91) and does not cross them.
+  # One container instead of two, for a dev dependency.
+  temporal:
+    image: temporalio/auto-setup:1.25.2
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_SEEDS: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-asip}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:-asip_dev_only}
+    ports:
+      - "127.0.0.1:7233:7233"
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "temporal:7233"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [core]
+
+volumes:
+  pgdata:
+  miniodata:
+
+networks:
+  core:
+    driver: bridge
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # V-3 / D-11 — read before adding the fetcher.
+  #
+  # The Fetch Fleet holds no database credentials and cannot reach the core
+  # database. It pulls jobs from a queue and writes bundles to object storage,
+  # and nothing else. If the fleet is compromised, the data is not.
+  #
+  # That means the fetcher service does NOT join `core`. It joins a separate
+  # network with access to the queue and the object store only, and it never
+  # receives POSTGRES_* or ASIP_DB_URL in its environment. This is a veto, not
+  # a preference — it cannot be relaxed to make an integration test pass.
+  #
+  # fetch:
+  #   driver: bridge
+  # ═══════════════════════════════════════════════════════════════════════
