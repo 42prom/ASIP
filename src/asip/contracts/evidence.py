@@ -159,6 +159,57 @@ class BundleRef:
 
 
 @dataclass(frozen=True, slots=True)
+class BundleRecord:
+    """The persisted description of a written bundle.
+
+    Holds the manifest itself rather than only its digest, so that a bundle can
+    be re-verified from the database plus the object store without parsing the
+    WARC first. Append-only: there is no field here that is ever updated.
+    """
+
+    bundle_id: UUID
+    capture_id: UUID
+    tenant_id: UUID
+    trace_id: str
+    source_url: str
+    captured_at: datetime
+    manifest: Manifest
+    manifest_sha256: str
+    object_prefix: str
+    render_params: RenderParams | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TimestampRecord:
+    """One RFC 3161 token obtained for a bundle's manifest digest (D-22).
+
+    A separate append-only record rather than a column on ``BundleRecord``.
+    The token usually arrives after the bundle is committed — if it were a
+    field on the bundle, recording it would be an UPDATE against an evidence
+    table, and there is no UPDATE path against evidence tables. Appending a
+    token instead keeps the whole subsystem write-once, and a bundle's TSA
+    state becomes something *derived* from which tokens exist rather than a
+    mutable flag that some code path could set without one.
+    """
+
+    tenant_id: UUID
+    bundle_id: UUID
+    manifest_sha256: str
+    authority_url: str
+    token: bytes
+    obtained_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class StoredBundle:
+    """Everything needed to re-verify a bundle, as read back from storage."""
+
+    record: BundleRecord
+    chain_entry: ChainEntry
+    timestamps: tuple[TimestampRecord, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class VerificationResult:
     """Why a bundle did or did not verify.
 

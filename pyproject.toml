@@ -10,11 +10,23 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "TBD" }
 
-# Runtime dependencies are deliberately empty. Nothing is built yet, and
-# pre-declaring FastAPI / Playwright / warcio would be adding dependencies
-# against an anticipated constraint rather than a measured one (CLAUDE.md §3).
-# They land with the code that needs them.
-dependencies = []
+# Dependencies land with the code that needs them, not ahead of it (CLAUDE.md
+# §3). These four arrive with the evidence adapters (L3) and each is required
+# by a directive rather than chosen for convenience:
+#
+#   warcio    D-20 — bundles are WARC, the archiving standard, so that tooling
+#                    which has never seen this code can open them.
+#   psycopg   D-91 — sch_evidence: captures, evidence_bundles, hash_chain.
+#   boto3     §10.1 — S3-compatible object store. Chosen over the minio client
+#                    because production needs Object Lock for WORM storage.
+#   rfc3161ng D-22 — external timestamping. A timestamp we generate ourselves
+#                    proves nothing; this is what turns a capture into evidence.
+dependencies = [
+  "warcio>=1.7",
+  "psycopg[binary]>=3.2",
+  "boto3>=1.35",
+  "rfc3161ng>=2.1",
+]
 
 [project.optional-dependencies]
 dev = [
