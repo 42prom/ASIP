@@ -8,10 +8,51 @@ Pure: values in, values out. Appending atomically alongside the bundle write
 is the application layer's job; this module only decides what a correct link
 looks like and whether a sequence of them holds together.
 
-DECISION NEEDING SIGN-OFF — D-21 requires that each entry contain the previous
-entry's hash but does not define the preimage. The scheme below is chosen here
-and is cheap to change only while no real bundle exists; after that, changing
-it invalidates every stored chain. See ``link_preimage``.
+THE PREIMAGE — specified here, and frozen once real evidence exists
+--------------------------------------------------------------------
+D-21 requires each entry to contain the previous entry's hash and stops there.
+The exact bytes that get hashed are specified below, because a chain whose
+preimage is only defined by its implementation cannot be verified by anything
+except that implementation.
+
+    SHA-256( LP("ASIP-CHAIN-v1")
+           || LP(hash_algorithm)
+           || LP(tenant_id)
+           || LP(chain_index, decimal)
+           || LP(prev_hash, lowercase hex)
+           || LP(manifest_sha256, lowercase hex)
+           || LP(bundle_id) )
+
+where LP(s) is the UTF-8 bytes of s preceded by their length as an 8-byte
+big-endian integer.
+
+Four deliberate choices, each aimed at the twenty-year case:
+
+1. **No JSON.** A verifier needs SHA-256, byte concatenation, and big-endian
+   integers. Nothing else. No canonicalisation scheme to reimplement and no
+   library whose behaviour might drift.
+
+2. **A version tag inside the hash.** "ASIP-CHAIN-v1" is domain separation: a
+   future v2 preimage cannot produce a v1 hash for different content, so the
+   two schemes can coexist in one chain during a migration. Without this, any
+   change to the preimage would require rewriting history — which an
+   append-only structure cannot do.
+
+3. **The hash algorithm is a hashed field, not an assumption.** SHA-256 will
+   not be the right answer forever. Recording the algorithm inside the
+   preimage means a future entry can adopt a stronger one and still link
+   correctly onto a SHA-256 predecessor, because the predecessor's hash is
+   just an opaque string to the successor.
+
+4. **Values are human-readable text.** A UUID is its canonical lowercase form,
+   an index is decimal, a digest is lowercase hex. Someone holding a printed
+   chain entry can reconstruct the preimage by hand. Binary packing would save
+   a few bytes and cost that.
+
+The preimage deliberately excludes wall-clock time. The authoritative time for
+a bundle is the external RFC 3161 token (D-22); a local timestamp inside the
+chain would be a second, weaker time claim that a reader might mistake for
+proof.
 """
 
 from __future__ import annotations
@@ -19,9 +60,18 @@ from __future__ import annotations
 from collections.abc import Sequence
 from uuid import UUID
 
-from asip.contracts.evidence import GENESIS_PREV_HASH, ChainEntry
+from asip.contracts.evidence import (
+    GENESIS_PREV_HASH,
+    HASH_ALGORITHM,
+    ChainEntry,
+)
 
-from .hashing import digest_of, is_hash_hex
+from .canonical import length_prefixed
+from .hashing import is_hash_hex, sha256_hex
+
+#: Domain separator and preimage version. Changing the preimage means minting a
+#: new tag, never editing this one — old entries must stay verifiable.
+CHAIN_PREIMAGE_VERSION = "ASIP-CHAIN-v1"
 
 
 class ChainError(ValueError):
@@ -34,31 +84,23 @@ def link_preimage(
     prev_hash: str,
     manifest_sha256: str,
     bundle_id: UUID,
-) -> dict[str, object]:
-    """The exact structure hashed to produce ``entry_hash``.
+    algorithm: str = HASH_ALGORITHM,
+) -> bytes:
+    """The exact bytes hashed to produce ``entry_hash``.
 
-    Five fields, all of them necessary:
-
-    - ``tenant_id`` binds the entry to one tenant's chain, so an entry cannot
-      be replayed into another tenant's chain (V-7).
-    - ``chain_index`` binds it to a position, so two entries cannot be swapped.
-    - ``prev_hash`` is the link itself.
-    - ``manifest_sha256`` is what the entry attests to.
-    - ``bundle_id`` binds it to one bundle, so a manifest cannot be re-attested
-      under a different bundle identity.
-
-    Deliberately excluded: any wall-clock time. The authoritative time for a
-    bundle is the external RFC 3161 token (D-22), and including a local
-    timestamp here would create a second, weaker time claim inside the chain
-    that a reader might mistake for proof.
+    Exposed as its own function so that the specification is executable rather
+    than described in a comment, and so the standalone verifier can be checked
+    against it byte for byte.
     """
-    return {
-        "bundle_id": str(bundle_id),
-        "chain_index": chain_index,
-        "manifest_sha256": manifest_sha256,
-        "prev_hash": prev_hash,
-        "tenant_id": str(tenant_id),
-    }
+    return length_prefixed(
+        CHAIN_PREIMAGE_VERSION,
+        algorithm,
+        str(tenant_id),
+        str(chain_index),
+        prev_hash,
+        manifest_sha256,
+        str(bundle_id),
+    )
 
 
 def compute_entry_hash(
@@ -67,8 +109,11 @@ def compute_entry_hash(
     prev_hash: str,
     manifest_sha256: str,
     bundle_id: UUID,
+    algorithm: str = HASH_ALGORITHM,
 ) -> str:
-    return digest_of(link_preimage(tenant_id, chain_index, prev_hash, manifest_sha256, bundle_id))
+    return sha256_hex(
+        link_preimage(tenant_id, chain_index, prev_hash, manifest_sha256, bundle_id, algorithm)
+    )
 
 
 def link(
@@ -105,6 +150,7 @@ def link(
         entry_hash=compute_entry_hash(
             tenant_id, chain_index, prev_hash, manifest_sha256, bundle_id
         ),
+        algorithm=HASH_ALGORITHM,
     )
 
 
@@ -138,6 +184,7 @@ def verify_chain(entries: Sequence[ChainEntry]) -> tuple[str, ...]:
             entry.prev_hash,
             entry.manifest_sha256,
             entry.bundle_id,
+            entry.algorithm,
         )
         if entry.entry_hash != expected_hash:
             problems.append(

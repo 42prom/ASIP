@@ -23,7 +23,9 @@ from asip.contracts.evidence import (
     ArtifactKind,
     BundleDraft,
     BundleRecord,
+    CaptureBinding,
     ChainEntry,
+    Manifest,
     RenderParams,
     TsaStatus,
     VerificationOutcome,
@@ -34,7 +36,7 @@ from asip.modules.evidence.adapters.warc_archive import WarcBundleArchive
 from asip.modules.evidence.application.verify_bundle import VerifyBundle
 from asip.modules.evidence.application.write_bundle import ARCHIVE_OBJECT_NAME, WriteBundle
 from asip.modules.evidence.domain.hashing import sha256_hex
-from asip.modules.evidence.domain.manifest import build_manifest, manifest_digest
+from asip.modules.evidence.domain.manifest import build_manifest, build_manifest_document
 
 from .conftest import TENANT
 
@@ -197,11 +199,12 @@ def test_tampering_with_a_stored_artifact_is_detected_after_a_real_round_trip(
     # Rewrite the stored archive in place, exactly as someone with storage
     # credentials but no database access would.
     key = f"{ref.tenant_id}/{ref.bundle_id}/{ARCHIVE_OBJECT_NAME}"
+    manifest = _manifest_of(draft)
     WarcBundleArchive(object_store).write(
         key,
-        build_manifest(draft.artifacts),
+        build_manifest_document(manifest),
+        manifest,
         {"dom.html.gz": b"<html>rewritten history</html>", "screenshot.png": SHOT},
-        {"bundle_id": str(draft.bundle_id)},
     )
 
     result = verifier.execute(ref)
@@ -224,8 +227,7 @@ def test_the_bundle_and_chain_commit_atomically(
     which is the property the port's two-argument shape exists to guarantee.
     """
     draft, _ = make_draft(capture_id)
-    manifest = build_manifest(draft.artifacts)
-    digest = manifest_digest(manifest)
+    document = build_manifest_document(_manifest_of(draft))
 
     record = BundleRecord(
         bundle_id=draft.bundle_id,
@@ -234,8 +236,7 @@ def test_the_bundle_and_chain_commit_atomically(
         trace_id=draft.trace_id,
         source_url=draft.source_url,
         captured_at=draft.captured_at,
-        manifest=manifest,
-        manifest_sha256=digest,
+        manifest_document=document,
         object_prefix=f"{TENANT}/{draft.bundle_id}",
     )
     # chain_index 5 with the genesis prev_hash violates chain_genesis_is_index_zero.
@@ -243,7 +244,7 @@ def test_the_bundle_and_chain_commit_atomically(
         tenant_id=TENANT,
         chain_index=5,
         prev_hash="0" * 64,
-        manifest_sha256=digest,
+        manifest_sha256=document.sha256,
         bundle_id=draft.bundle_id,
         entry_hash=sha256_hex(b"whatever"),
     )
@@ -252,3 +253,19 @@ def test_the_bundle_and_chain_commit_atomically(
         repository.commit_bundle(record, bad_entry)
 
     assert repository.load_bundle(TENANT, draft.bundle_id) is None
+
+
+def _manifest_of(draft: BundleDraft) -> Manifest:
+    """The manifest a draft would produce, for tests that forge one."""
+    return build_manifest(
+        draft.artifacts,
+        CaptureBinding(
+            bundle_id=draft.bundle_id,
+            tenant_id=draft.tenant_id,
+            capture_id=draft.capture_id,
+            source_url=draft.source_url,
+            captured_at=draft.captured_at,
+            trace_id=draft.trace_id,
+        ),
+        draft.render_params,
+    )

@@ -31,28 +31,48 @@ def test_every_migration_has_a_rollback_file() -> None:
 
 @pytest.mark.isolation
 def test_apply_rollback_reapply_leaves_a_working_schema(migrated_db: str) -> None:
-    evidence = next(m for m in discover() if m.module == "evidence" and m.version == "001")
+    """Every migration down in reverse order, then every one back up."""
+    evidence = [m for m in discover() if m.module == "evidence"]
 
     with psycopg.connect(migrated_db) as conn:
         with conn.cursor() as cur:
             cur.execute(BOOTSTRAP)
         conn.commit()
 
-        # Down.
-        rollback(conn, evidence)
-        conn.commit()
-        assert ("evidence", "001") not in applied_versions(conn)
+        for migration in reversed(evidence):
+            rollback(conn, migration)
+            conn.commit()
+
+        assert not [v for m, v in applied_versions(conn) if m == "evidence"]
         with conn.cursor() as cur:
             cur.execute("SELECT to_regclass('sch_evidence.evidence_bundles')")
             assert scalar(cur) is None
 
         # Up again — the part that catches a rollback leaving debris behind.
-        apply(conn, evidence)
-        conn.commit()
-        assert ("evidence", "001") in applied_versions(conn)
+        for migration in evidence:
+            apply(conn, migration)
+            conn.commit()
+
         with conn.cursor() as cur:
-            cur.execute("SELECT to_regclass('sch_evidence.evidence_bundles')")
+            cur.execute("SELECT to_regclass('sch_evidence.chain_anchors')")
             assert scalar(cur) is not None
+
+
+@pytest.mark.isolation
+def test_rolling_back_out_of_order_is_refused(migrated_db: str) -> None:
+    """001's rollback is DROP SCHEMA CASCADE — it would silently remove 002.
+
+    Found the hard way: the schema was destroyed while 002 stayed recorded as
+    applied, so the next run skipped it and every query hit a missing column.
+    """
+    first = next(m for m in discover() if m.module == "evidence" and m.version == "001")
+
+    with psycopg.connect(migrated_db) as conn:
+        with conn.cursor() as cur:
+            cur.execute(BOOTSTRAP)
+        conn.commit()
+        with pytest.raises(RuntimeError, match="reverse order"):
+            rollback(conn, first)
 
 
 @pytest.mark.isolation

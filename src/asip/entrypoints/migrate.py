@@ -99,6 +99,35 @@ def rollback(conn: psycopg.Connection, migration: Migration) -> None:
             f"{migration} has no rollback file at {migration.rollback_path}. "
             "A migration without a tested rollback is not finished."
         )
+    # Refuse to roll back what was never applied. Running a rollback against a
+    # schema the migration never touched half-applies its inverse — the failure
+    # that surfaced this check left a constraint behind that then blocked the
+    # forward migration.
+    done = applied_versions(conn)
+    if (migration.module, migration.version) not in done:
+        raise RuntimeError(
+            f"{migration} is not applied; refusing to run its rollback. "
+            "Rolling back an unapplied migration leaves the schema in a state "
+            "neither version expects."
+        )
+
+    # Later migrations in the same module build on this one. Rolling back out of
+    # order leaves them recorded as applied while the objects they created are
+    # gone — 001's rollback is DROP SCHEMA CASCADE, which silently takes 002's
+    # tables with it. Migrations come back off in reverse order or not at all.
+    later = sorted(
+        version
+        for module, version in done
+        if module == migration.module and version > migration.version
+    )
+    if later:
+        raise RuntimeError(
+            f"{migration} cannot be rolled back while {migration.module}/"
+            f"{later[0]} is still applied. Roll back in reverse order: "
+            + ", ".join(f"{migration.module}/{v}" for v in reversed(later))
+            + f", then {migration}."
+        )
+
     sql = migration.rollback_path.read_text(encoding="utf-8")
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(sql)

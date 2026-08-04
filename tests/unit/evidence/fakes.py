@@ -17,6 +17,7 @@ from asip.contracts.evidence import (
     BundleRecord,
     ChainEntry,
     Manifest,
+    ManifestDocument,
     StoredBundle,
     TimestampRecord,
 )
@@ -63,28 +64,41 @@ class FakeArchive:
     def __init__(self) -> None:
         self.archives: dict[str, dict[str, bytes]] = {}
         self.manifests: dict[str, Manifest] = {}
-        self.metadata: dict[str, Mapping[str, object]] = {}
+        self.documents: dict[str, bytes] = {}
+        self.seals: dict[str, list[bytes]] = {}
         self.write_calls: list[str] = []
         self.fail_write = False
 
     def write(
         self,
         key: str,
+        document: ManifestDocument,
         manifest: Manifest,
         artifacts: Mapping[str, bytes],
-        metadata: Mapping[str, object],
     ) -> None:
         if self.fail_write:
             raise OSError(f"object store unavailable for {key}")
         self.archives[key] = dict(artifacts)
         self.manifests[key] = manifest
-        self.metadata[key] = dict(metadata)
+        self.documents[key] = document.raw
         self.write_calls.append(key)
+
+    def append_seal(self, key: str, seal: bytes) -> None:
+        self.seals.setdefault(key, []).append(seal)
 
     def read(self, key: str) -> dict[str, bytes]:
         if key not in self.archives:
             raise KeyError(f"no archive at {key}")
         return dict(self.archives[key])
+
+    def read_manifest(self, key: str) -> bytes:
+        if key not in self.documents:
+            raise KeyError(f"no manifest at {key}")
+        return self.documents[key]
+
+    def read_seal(self, key: str) -> bytes | None:
+        seals = self.seals.get(key)
+        return seals[-1] if seals else None
 
     def corrupt(self, key: str, name: str, data: bytes) -> None:
         """Simulate tampering inside a sealed archive."""

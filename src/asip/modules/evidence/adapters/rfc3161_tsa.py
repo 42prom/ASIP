@@ -24,6 +24,25 @@ from typing import Any
 
 import rfc3161ng
 
+#: Development default. FreeTSA is a public RFC 3161 authority and is used here
+#: only because a default has to be something — nothing in this module knows or
+#: cares which authority it is talking to.
+#:
+#: Production switches provider through configuration alone: point ASIP_TSA_URL
+#: at DigiCert, Sectigo, a national timestamping service, or an in-house TSA,
+#: supply that authority's certificate, and nothing in this file changes. There
+#: is deliberately no per-provider branch anywhere in the codebase, because the
+#: moment one exists, switching authority becomes a code change and the choice
+#: stops being reversible.
+#:
+#: Stamping with two independent authorities is supported by the same design:
+#: tokens are appended records, so a bundle can carry several. That is worth
+#: doing for evidence expected to matter in a decade — an authority that ceases
+#: operating or has its key compromised does not take the evidence with it.
+FREETSA_URL = "https://freetsa.org/tsr"
+FREETSA_CERTIFICATE_URL = "https://freetsa.org/files/tsa.crt"
+FREETSA_CA_URL = "https://freetsa.org/files/cacert.pem"
+
 
 class TimestampUnavailable(RuntimeError):
     """The authority could not be reached or refused the request.

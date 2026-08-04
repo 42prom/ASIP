@@ -14,7 +14,6 @@ before (V-7).
 
 from __future__ import annotations
 
-import json
 from dataclasses import asdict
 from typing import Any
 from uuid import UUID
@@ -23,11 +22,9 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from asip.contracts.evidence import (
-    Artifact,
-    ArtifactKind,
     BundleRecord,
     ChainEntry,
-    Manifest,
+    ManifestDocument,
     RenderParams,
     StoredBundle,
     TimestampRecord,
@@ -68,7 +65,7 @@ class PostgresEvidenceRepository:
                     record.tenant_id,
                     record.trace_id,
                     record.source_url,
-                    Jsonb(_manifest_to_json(record.manifest)),
+                    record.manifest_document.raw.decode("utf-8"),
                     record.manifest_sha256,
                     record.object_prefix,
                     None if record.render_params is None else Jsonb(asdict(record.render_params)),
@@ -78,8 +75,8 @@ class PostgresEvidenceRepository:
                 """
                 INSERT INTO sch_evidence.hash_chain
                     (tenant_id, chain_index, prev_hash, manifest_sha256,
-                     bundle_id, bundle_captured_at, entry_hash)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                     bundle_id, bundle_captured_at, entry_hash, algorithm)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     entry.tenant_id,
@@ -89,6 +86,7 @@ class PostgresEvidenceRepository:
                     entry.bundle_id,
                     record.captured_at,
                     entry.entry_hash,
+                    entry.algorithm,
                 ),
             )
 
@@ -122,7 +120,7 @@ class PostgresEvidenceRepository:
             cur.execute(
                 """
                 SELECT tenant_id, chain_index, prev_hash, manifest_sha256,
-                       bundle_id, entry_hash
+                       bundle_id, entry_hash, algorithm
                   FROM sch_evidence.hash_chain
                  WHERE tenant_id = %s
                  ORDER BY chain_index DESC
@@ -138,7 +136,7 @@ class PostgresEvidenceRepository:
             cur.execute(
                 """
                 SELECT tenant_id, chain_index, prev_hash, manifest_sha256,
-                       bundle_id, entry_hash
+                       bundle_id, entry_hash, algorithm
                   FROM sch_evidence.hash_chain
                  WHERE tenant_id = %s AND chain_index BETWEEN %s AND %s
                  ORDER BY chain_index
@@ -165,7 +163,7 @@ class PostgresEvidenceRepository:
             cur.execute(
                 """
                 SELECT tenant_id, chain_index, prev_hash, manifest_sha256,
-                       bundle_id, entry_hash
+                       bundle_id, entry_hash, algorithm
                   FROM sch_evidence.hash_chain
                  WHERE tenant_id = %s AND bundle_id = %s
                 """,
@@ -203,39 +201,6 @@ class PostgresEvidenceRepository:
 # ── row mapping ─────────────────────────────────────────────────────────────
 
 
-def _manifest_to_json(manifest: Manifest) -> dict[str, Any]:
-    return {
-        "algorithm": manifest.algorithm,
-        "artifacts": [
-            {
-                "kind": str(a.kind),
-                "media_type": a.media_type,
-                "name": a.name,
-                "sha256": a.sha256,
-                "size_bytes": a.size_bytes,
-            }
-            for a in manifest.artifacts
-        ],
-    }
-
-
-def _manifest_from_json(payload: Any) -> Manifest:
-    data = json.loads(payload) if isinstance(payload, str) else payload
-    return Manifest(
-        algorithm=data["algorithm"],
-        artifacts=tuple(
-            Artifact(
-                name=a["name"],
-                kind=ArtifactKind(a["kind"]),
-                media_type=a["media_type"],
-                size_bytes=a["size_bytes"],
-                sha256=a["sha256"],
-            )
-            for a in data["artifacts"]
-        ),
-    )
-
-
 def _row_to_bundle(row: tuple[Any, ...]) -> BundleRecord:
     return BundleRecord(
         bundle_id=row[0],
@@ -244,8 +209,7 @@ def _row_to_bundle(row: tuple[Any, ...]) -> BundleRecord:
         tenant_id=row[3],
         trace_id=row[4],
         source_url=row[5],
-        manifest=_manifest_from_json(row[6]),
-        manifest_sha256=row[7],
+        manifest_document=ManifestDocument(raw=row[6].encode("utf-8"), sha256=row[7]),
         object_prefix=row[8],
         render_params=None if row[9] is None else _render_from_json(row[9]),
     )
@@ -269,6 +233,7 @@ def _row_to_chain_entry(row: tuple[Any, ...]) -> ChainEntry:
         manifest_sha256=row[3],
         bundle_id=row[4],
         entry_hash=row[5],
+        algorithm=row[6],
     )
 
 

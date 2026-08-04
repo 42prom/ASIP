@@ -22,20 +22,42 @@ what invariant 1 exists to catch.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from io import BytesIO
+from typing import Any
 
 from warcio.archiveiterator import ArchiveIterator
+from warcio.utils import Digester
 from warcio.warcwriter import WARCWriter
 
-from asip.contracts.evidence import Manifest
+from asip.contracts.evidence import Manifest, ManifestDocument
 from asip.contracts.ports.evidence import ObjectStore
 
 #: WARC-Target-URI scheme for artifacts. A urn keeps the record addressable
 #: without implying the artifact is retrievable at some http location.
 ARTIFACT_URI_PREFIX = "urn:asip:artifact"
 MANIFEST_URI = "urn:asip:manifest"
+SEAL_URI = "urn:asip:seal"
+
+
+class _Sha256WARCWriter(WARCWriter):
+    """A WARC writer whose native block digests are SHA-256, not SHA-1.
+
+    warcio defaults to SHA-1 because that is what the format's examples use and
+    what most crawlers emit. SHA-1 is broken for collision resistance, and a
+    digest header a future reader cannot rely on is worse than useless in a
+    forensic archive — someone checking only the WARC-native digest would
+    believe they had verified something.
+
+    ``WARC-Block-Digest`` is a labelled field: the algorithm travels with the
+    value, so ``sha256:...`` is as conformant as ``sha1:...`` and any compliant
+    reader handles it. Every record therefore carries two independent integrity
+    mechanisms — the format's own digest and ASIP's manifest — and a tampering
+    attempt has to defeat both at once.
+    """
+
+    def _create_digester(self) -> Digester:
+        return Digester("sha256")
 
 
 class WarcBundleArchive:
@@ -52,12 +74,12 @@ class WarcBundleArchive:
     def write(
         self,
         key: str,
+        document: ManifestDocument,
         manifest: Manifest,
         artifacts: Mapping[str, bytes],
-        metadata: Mapping[str, object],
     ) -> None:
         buffer = BytesIO()
-        writer = WARCWriter(buffer, gzip=True)
+        writer = _Sha256WARCWriter(buffer, gzip=True)
 
         writer.write_record(
             writer.create_warcinfo_record(
@@ -65,49 +87,63 @@ class WarcBundleArchive:
                 info={
                     "software": "ASIP",
                     "format": "WARC File Format 1.1",
-                    "capture": json.dumps(metadata, sort_keys=True, ensure_ascii=False),
+                    "conformsTo": "https://iipc.github.io/warc-specifications/",
+                    # Capture metadata is duplicated here for readability only.
+                    # The authoritative copy is inside the manifest record,
+                    # where it is covered by the manifest digest and therefore
+                    # by the chain. Anything read from warcinfo is unverified.
+                    "capture": document.raw.decode("utf-8"),
                 },
             )
         )
 
-        manifest_json = json.dumps(
-            {
-                "algorithm": manifest.algorithm,
-                "artifacts": [
-                    {
-                        "kind": str(a.kind),
-                        "media_type": a.media_type,
-                        "name": a.name,
-                        "sha256": a.sha256,
-                        "size_bytes": a.size_bytes,
-                    }
-                    for a in manifest.artifacts
-                ],
-            },
-            sort_keys=True,
-            ensure_ascii=False,
-        ).encode("utf-8")
-
+        # The manifest record carries the exact bytes that were hashed. Written
+        # verbatim, never re-serialised — the digest belongs to these bytes.
         writer.write_record(
-            writer.create_warc_record(
-                MANIFEST_URI,
-                "metadata",
-                payload=BytesIO(manifest_json),
-                warc_content_type="application/json",
-            )
+            self._record(writer, MANIFEST_URI, "metadata", document.raw, "application/json")
         )
 
         for artifact in manifest.artifacts:
             writer.write_record(
-                writer.create_warc_record(
+                self._record(
+                    writer,
                     f"{ARTIFACT_URI_PREFIX}:{artifact.name}",
                     "resource",
-                    payload=BytesIO(artifacts[artifact.name]),
-                    warc_content_type=artifact.media_type,
+                    artifacts[artifact.name],
+                    artifact.media_type,
                 )
             )
 
         self._objects.put(key, buffer.getvalue(), "application/warc")
+
+    def append_seal(self, key: str, seal: bytes) -> None:
+        """Append a sealed segment carrying the chain entry and TSA token.
+
+        WARC files concatenate: a gzipped WARC is a sequence of independent
+        gzip members, so appending a second segment yields a longer file that
+        every standard reader accepts. The existing bytes are never rewritten,
+        which keeps the archive append-only at the byte level rather than only
+        by convention.
+
+        The seal is separate from the manifest because it cannot exist yet when
+        the manifest is written — the chain entry needs the manifest digest,
+        and the timestamp needs a round trip to a third party that may be slow
+        or unreachable.
+        """
+        buffer = BytesIO()
+        writer = _Sha256WARCWriter(buffer, gzip=True)
+        writer.write_record(self._record(writer, SEAL_URI, "metadata", seal, "application/json"))
+        self._objects.put(key, self._objects.get(key) + buffer.getvalue(), "application/warc")
+
+    @staticmethod
+    def _record(writer: Any, uri: str, rec_type: str, payload: bytes, media_type: str) -> Any:
+        """Create a record. The writer supplies SHA-256 block digests itself."""
+        return writer.create_warc_record(
+            uri,
+            rec_type,
+            payload=BytesIO(payload),
+            warc_content_type=media_type,
+        )
 
     def read(self, key: str) -> dict[str, bytes]:
         """Every artifact record in the archive, by name.
@@ -117,15 +153,41 @@ class WarcBundleArchive:
         skipped.
         """
         found: dict[str, bytes] = {}
-        stream = BytesIO(self._objects.get(key))
-
-        for record in ArchiveIterator(stream):
-            if record.rec_type != "resource":
-                continue
-            uri = record.rec_headers.get_header("WARC-Target-URI") or ""
-            if not uri.startswith(f"{ARTIFACT_URI_PREFIX}:"):
-                continue
-            name = uri[len(ARTIFACT_URI_PREFIX) + 1 :]
-            found[name] = record.content_stream().read()
-
+        for uri, payload in self._iter_payloads(key):
+            if uri.startswith(f"{ARTIFACT_URI_PREFIX}:"):
+                found[uri[len(ARTIFACT_URI_PREFIX) + 1 :]] = payload
         return found
+
+    def read_manifest(self, key: str) -> bytes:
+        for uri, payload in self._iter_payloads(key):
+            if uri == MANIFEST_URI:
+                return payload
+        raise KeyError(f"no manifest record in {key}")
+
+    def read_seal(self, key: str) -> bytes | None:
+        """The most recent seal, or None if the bundle is not sealed yet.
+
+        Last wins: seals are appended, so a re-seal (a second timestamp from
+        another authority, say) leaves both in the archive and the latest is
+        the current state. Earlier ones stay readable, which is the point of
+        appending rather than replacing.
+        """
+        seal: bytes | None = None
+        for uri, payload in self._iter_payloads(key):
+            if uri == SEAL_URI:
+                seal = payload
+        return seal
+
+    def _iter_payloads(self, key: str) -> list[tuple[str, bytes]]:
+        """Read every record's URI and payload in one pass.
+
+        Payloads are read *during* iteration and collected eagerly.
+        ArchiveIterator streams: a record's content is only readable while it
+        is the current one, and collecting records to read later silently
+        yields empty bytes.
+        """
+        payloads: list[tuple[str, bytes]] = []
+        for record in ArchiveIterator(BytesIO(self._objects.get(key))):
+            uri = record.rec_headers.get_header("WARC-Target-URI") or ""
+            payloads.append((uri, record.content_stream().read()))
+        return payloads

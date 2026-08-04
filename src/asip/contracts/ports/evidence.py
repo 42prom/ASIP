@@ -20,6 +20,7 @@ from asip.contracts.evidence import (
     BundleRef,
     ChainEntry,
     Manifest,
+    ManifestDocument,
     StoredBundle,
     TimestampRecord,
     VerificationResult,
@@ -64,12 +65,33 @@ class BundleArchive(Protocol):
     def write(
         self,
         key: str,
+        document: ManifestDocument,
         manifest: Manifest,
         artifacts: Mapping[str, bytes],
-        metadata: Mapping[str, object],
     ) -> None: ...
 
+    def append_seal(self, key: str, seal: bytes) -> None:
+        """Append the chain entry and timestamp to the archive itself.
+
+        Without this the bundle is only verifiable against ASIP's database. The
+        seal is what lets a stranger with the file and nothing else confirm
+        when the content existed.
+        """
+        ...
+
     def read(self, key: str) -> dict[str, bytes]: ...
+
+    def read_manifest(self, key: str) -> bytes:
+        """The manifest record's exact stored bytes.
+
+        Returned as bytes, not as a parsed structure, because the digest is
+        over these bytes. Handing back a parsed manifest would force the caller
+        to re-serialise it to check anything, which is the dependency this
+        design exists to remove.
+        """
+        ...
+
+    def read_seal(self, key: str) -> bytes | None: ...
 
 
 class TimestampAuthority(Protocol):

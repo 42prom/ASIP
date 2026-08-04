@@ -99,16 +99,61 @@ class RenderParams:
 
 
 @dataclass(frozen=True, slots=True)
-class Manifest:
-    """SHA-256 of every artifact in the bundle (D-19).
+class CaptureBinding:
+    """What a manifest attests about the capture itself.
 
-    The manifest is the bundle's self-description. A file present in the bundle
-    but absent from the manifest invalidates the bundle just as surely as a
-    hash mismatch does.
+    Inside the manifest, and therefore inside its digest and the hash chain,
+    because it has to be. Left in the WARC's ``warcinfo`` record alone — where
+    it originally sat — the source URL and capture time were covered by no hash
+    at all, and a sealed bundle could be relabelled as a capture of a different
+    page at a different time without breaking a single check.
+    """
+
+    bundle_id: UUID
+    tenant_id: UUID
+    capture_id: UUID
+    source_url: str
+    captured_at: datetime
+    trace_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class Manifest:
+    """The structured content of a manifest document (D-19).
+
+    The bundle's self-description: what was captured, from where, when, and the
+    SHA-256 of every artifact. A file present in the bundle but absent from the
+    manifest invalidates the bundle just as surely as a hash mismatch does.
+
+    This is the *input* to a manifest document. The authoritative artifact is
+    ``ManifestDocument.raw`` — see there for why the distinction matters.
     """
 
     algorithm: str
+    capture: CaptureBinding
     artifacts: tuple[Artifact, ...]
+    render_params: RenderParams | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestDocument:
+    """A manifest as stored: exact bytes, and the digest of those bytes.
+
+    The digest is ``sha256(raw)`` — the hash of the bytes that are physically
+    in the archive, never a hash recomputed from a re-serialised structure.
+
+    That distinction is the load-bearing one for long-term verification. If the
+    digest were computed from parsed content, every future verifier would have
+    to reproduce our JSON canonicalisation exactly: key order, separators,
+    Unicode escaping, float formatting. Those are the details canonical-JSON
+    implementations are famous for disagreeing about, and a disagreement twenty
+    years from now would make valid evidence fail to verify.
+
+    Hashing stored bytes needs none of it. Read the record, hash it, compare.
+    """
+
+    raw: bytes
+    sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +172,14 @@ class ChainEntry:
     manifest_sha256: str
     bundle_id: UUID
     entry_hash: str
+
+    #: The digest algorithm used for this entry, recorded rather than assumed.
+    #: SHA-256 will not be the right answer forever, and an entry that names its
+    #: own algorithm can be succeeded by one using a stronger algorithm without
+    #: invalidating anything — the predecessor's hash is an opaque string to its
+    #: successor. A chain that hard-codes its algorithm can only be migrated by
+    #: rewriting history, which an append-only structure cannot do.
+    algorithm: str = HASH_ALGORITHM
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,10 +226,14 @@ class BundleRecord:
     trace_id: str
     source_url: str
     captured_at: datetime
-    manifest: Manifest
-    manifest_sha256: str
+    manifest_document: ManifestDocument
     object_prefix: str
     render_params: RenderParams | None = None
+
+    @property
+    def manifest_sha256(self) -> str:
+        """Digest of the stored manifest bytes. Never recomputed from content."""
+        return self.manifest_document.sha256
 
 
 @dataclass(frozen=True, slots=True)

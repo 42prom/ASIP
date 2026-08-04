@@ -31,7 +31,7 @@ from asip.contracts.ports.evidence import BundleArchive, EvidenceRepository, Tim
 
 from ..domain.chain import verify_chain
 from ..domain.hashing import sha256_hex
-from ..domain.manifest import manifest_digest, verify_manifest
+from ..domain.manifest import parse_manifest_document, verify_manifest
 from .write_bundle import ARCHIVE_OBJECT_NAME
 
 
@@ -79,26 +79,47 @@ class VerifyBundle:
         """Re-hash what is actually in the object store."""
         problems: list[str] = []
         record = stored.record
+        key = f"{record.object_prefix}/{ARCHIVE_OBJECT_NAME}"
 
-        recomputed = manifest_digest(record.manifest)
-        if recomputed != record.manifest_sha256:
-            problems.append(
-                f"manifest digest does not match the stored value "
-                f"(stored {record.manifest_sha256}, recomputed {recomputed})"
-            )
-
-        # Read what the archive actually contains rather than re-hashing only
-        # what the manifest admits to. Enumerating the WARC's own records is
-        # what lets verify_manifest report a planted one; walking the manifest's
-        # entries never can.
         try:
-            stored_artifacts = self._archive.read(f"{record.object_prefix}/{ARCHIVE_OBJECT_NAME}")
+            archived_manifest = self._archive.read_manifest(key)
+            stored_artifacts = self._archive.read(key)
         except Exception as exc:
             problems.append(f"bundle archive could not be read: {exc}")
             return problems
 
+        # The digest is over the bytes in the archive. Hashing what is actually
+        # there — rather than re-serialising the parsed manifest and hashing
+        # that — is what makes this check reproducible by any tool, in any
+        # language, without reproducing our serialiser.
+        archived_digest = sha256_hex(archived_manifest)
+        if archived_digest != record.manifest_sha256:
+            problems.append(
+                f"manifest in the archive hashes to {archived_digest}, "
+                f"database records {record.manifest_sha256}"
+            )
+
+        try:
+            manifest = parse_manifest_document(archived_manifest)
+        except Exception as exc:
+            problems.append(f"manifest document could not be parsed: {exc}")
+            return problems
+
+        # The manifest binds the capture it describes, so a bundle relabelled
+        # as a capture of some other page fails here rather than nowhere.
+        if manifest.capture.bundle_id != record.bundle_id:
+            problems.append(
+                f"manifest attests to bundle {manifest.capture.bundle_id}, "
+                f"stored as {record.bundle_id}"
+            )
+        if manifest.capture.source_url != record.source_url:
+            problems.append(
+                f"manifest attests to {manifest.capture.source_url}, "
+                f"database records {record.source_url}"
+            )
+
         observed = {name: sha256_hex(data) for name, data in stored_artifacts.items()}
-        problems.extend(verify_manifest(record.manifest, observed))
+        problems.extend(verify_manifest(manifest, observed))
         return problems
 
     def _check_chain(self, stored: StoredBundle) -> list[str]:

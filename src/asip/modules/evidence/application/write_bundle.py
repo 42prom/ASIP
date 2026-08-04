@@ -36,12 +36,12 @@ and this docstring changes.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict
 
 from asip.contracts.evidence import (
     BundleDraft,
     BundleRecord,
     BundleRef,
+    CaptureBinding,
     ChainEntry,
     TimestampRecord,
     TsaStatus,
@@ -49,9 +49,10 @@ from asip.contracts.evidence import (
 from asip.contracts.ports.clock import Clock
 from asip.contracts.ports.evidence import BundleArchive, EvidenceRepository, TimestampAuthority
 
-from ..domain.chain import link
+from ..domain.chain import CHAIN_PREIMAGE_VERSION, link
 from ..domain.hashing import sha256_hex
-from ..domain.manifest import build_manifest, manifest_digest
+from ..domain.manifest import build_manifest, build_manifest_document
+from ..domain.seal import build_seal_document
 
 #: A bundle is one WARC object, not a directory of blobs (D-20).
 ARCHIVE_OBJECT_NAME = "bundle.warc.gz"
@@ -81,28 +82,25 @@ class WriteBundle:
     def execute(self, draft: BundleDraft, artifacts: Mapping[str, bytes]) -> BundleRef:
         self._reject_mismatched_artifacts(draft, artifacts)
 
-        manifest = build_manifest(draft.artifacts)
-        digest = manifest_digest(manifest)
+        manifest = build_manifest(
+            draft.artifacts,
+            CaptureBinding(
+                bundle_id=draft.bundle_id,
+                tenant_id=draft.tenant_id,
+                capture_id=draft.capture_id,
+                source_url=draft.source_url,
+                captured_at=draft.captured_at,
+                trace_id=draft.trace_id,
+            ),
+            draft.render_params,
+        )
+        document = build_manifest_document(manifest)
+        digest = document.sha256
         prefix = f"{draft.tenant_id}/{draft.bundle_id}"
+        key = f"{prefix}/{ARCHIVE_OBJECT_NAME}"
 
         # Step 1 — the WARC first. Idempotent; an orphan here is harmless.
-        self._archive.write(
-            f"{prefix}/{ARCHIVE_OBJECT_NAME}",
-            manifest,
-            artifacts,
-            {
-                "bundle_id": str(draft.bundle_id),
-                "capture_id": str(draft.capture_id),
-                "tenant_id": str(draft.tenant_id),
-                "trace_id": draft.trace_id,
-                "source_url": draft.source_url,
-                "captured_at": draft.captured_at.isoformat(),
-                # asdict, not vars: RenderParams uses slots and has no __dict__.
-                "render_params": (
-                    None if draft.render_params is None else asdict(draft.render_params)
-                ),
-            },
-        )
+        self._archive.write(key, document, manifest, artifacts)
 
         # Step 2 — the atomic pair.
         entry = self._next_chain_entry(draft, digest)
@@ -113,15 +111,19 @@ class WriteBundle:
             trace_id=draft.trace_id,
             source_url=draft.source_url,
             captured_at=draft.captured_at,
-            manifest=manifest,
-            manifest_sha256=digest,
+            manifest_document=document,
             object_prefix=prefix,
             render_params=draft.render_params,
         )
         self._repository.commit_bundle(record, entry)
 
         # Step 3 — external timestamp, outside the transaction.
-        tsa_status = self._timestamp(draft, digest)
+        tsa_status, stamps = self._timestamp(draft, digest)
+
+        # Step 4 — seal the archive. The chain entry and the token go into the
+        # WARC itself, so the bundle can be verified by someone who has the
+        # file and nothing else. Appended, never rewritten.
+        self._archive.append_seal(key, build_seal_document(entry, CHAIN_PREIMAGE_VERSION, stamps))
 
         return BundleRef(
             bundle_id=draft.bundle_id,
@@ -163,7 +165,9 @@ class WriteBundle:
         head = self._repository.head(draft.tenant_id)
         return link(head, draft.tenant_id, draft.bundle_id, digest)
 
-    def _timestamp(self, draft: BundleDraft, digest: str) -> TsaStatus:
+    def _timestamp(
+        self, draft: BundleDraft, digest: str
+    ) -> tuple[TsaStatus, tuple[TimestampRecord, ...]]:
         """Obtain and record an external timestamp.
 
         Returns PENDING on any failure. There is deliberately no branch that
@@ -177,19 +181,18 @@ class WriteBundle:
             # Any TSA failure means pending, not failed. Broad on purpose: a
             # network error, a malformed response and an unexpected library
             # exception all mean the same thing here — no external token yet.
-            return TsaStatus.PENDING
+            return TsaStatus.PENDING, ()
 
         if not self._tsa.verify(digest, token):
-            return TsaStatus.FAILED
+            return TsaStatus.FAILED, ()
 
-        self._repository.append_timestamp(
-            TimestampRecord(
-                tenant_id=draft.tenant_id,
-                bundle_id=draft.bundle_id,
-                manifest_sha256=digest,
-                authority_url=self._authority_url,
-                token=token,
-                obtained_at=self._clock.now(),
-            )
+        stamp = TimestampRecord(
+            tenant_id=draft.tenant_id,
+            bundle_id=draft.bundle_id,
+            manifest_sha256=digest,
+            authority_url=self._authority_url,
+            token=token,
+            obtained_at=self._clock.now(),
         )
-        return TsaStatus.VERIFIED
+        self._repository.append_timestamp(stamp)
+        return TsaStatus.VERIFIED, (stamp,)
