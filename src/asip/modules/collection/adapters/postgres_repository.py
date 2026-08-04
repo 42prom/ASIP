@@ -28,10 +28,19 @@ class PostgresCollectionRepository:
     ) -> None:
         with self._conn.cursor() as cur:
             cur.execute(
+                # Re-seeding must be able to REPAIR a source, not just skip it.
+                # DO NOTHING meant a wrong URL — say, one pointing at a host the
+                # fetcher cannot resolve — survived every attempt to fix it, and
+                # the only remedy was hand-editing the database. Configuration
+                # rows are not evidence; correcting one is the intended path.
                 "INSERT INTO sch_collection.sources "
                 "(source_id, tenant_id, name, url, platform, priority, is_canary, "
                 " interval_seconds) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
-                "ON CONFLICT (source_id) DO NOTHING",
+                "ON CONFLICT (source_id) DO UPDATE SET "
+                "  name = EXCLUDED.name, url = EXCLUDED.url, "
+                "  platform = EXCLUDED.platform, priority = EXCLUDED.priority, "
+                "  is_canary = EXCLUDED.is_canary, "
+                "  interval_seconds = EXCLUDED.interval_seconds",
                 (source_id, tenant_id, name, url, platform, priority, is_canary, interval_seconds),
             )
             cur.execute(

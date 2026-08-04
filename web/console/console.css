@@ -18,9 +18,24 @@
   --status-stale:   #8A7A45;
   --status-unknown: var(--slate);
 
-  --font-display: "Noto Serif Georgian", Georgia, serif;
-  --font-body:    "FiraGO", "Noto Sans Georgian", system-ui, sans-serif;
-  --font-data:    "JetBrains Mono", ui-monospace, "Cascadia Mono", monospace;
+  /* D-63 — Georgian coverage is the FIRST criterion, not an afterthought.
+   *
+   * The named faces (Noto Serif Georgian, FiraGO, JetBrains Mono) are the
+   * project's choice and are not bundled yet — licensing and self-hosting are
+   * unresolved, and fetching them from a CDN would make an offline forensic
+   * console depend on a third party being reachable. So each stack below falls
+   * through to faces that ship with Windows, macOS and Linux and DO cover
+   * Georgian: Sylfaen and BPG on Windows, Noto on Linux, system defaults on
+   * macOS. Latin-only fallbacks would render Georgian as boxes, which D-63
+   * exists to prevent.
+   *
+   * Verify with the canary: it contains a Georgian line on purpose. */
+  --font-display: "Noto Serif Georgian", "Sylfaen", "BPG Glaho", Georgia,
+                  "Times New Roman", serif;
+  --font-body:    "FiraGO", "Noto Sans Georgian", "Segoe UI", "Sylfaen",
+                  system-ui, -apple-system, "Helvetica Neue", sans-serif;
+  --font-data:    "JetBrains Mono", ui-monospace, "Cascadia Mono", "Consolas",
+                  "DejaVu Sans Mono", "Menlo", monospace;
 
   --text-xs: 0.75rem;
   --text-sm: 0.8125rem;
@@ -57,14 +72,19 @@ body {
 /* ── chrome ───────────────────────────────────────────────────────────── */
 
 .chrome {
-  display: flex; align-items: center; gap: var(--space-6);
-  padding: var(--space-3) var(--space-4);
-  border-bottom: var(--border);
+  display: flex; align-items: center; gap: var(--space-4);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--archive);
   background: #FFF;
   position: sticky; top: 0; z-index: 10;
   flex-wrap: wrap;
+  min-height: 56px;
+  box-shadow: 0 1px 0 rgba(20, 24, 29, 0.04);
 }
-.brand { font-family: var(--font-display); font-size: var(--text-lg); font-weight: 600; }
+.brand {
+  font-family: var(--font-display); font-size: var(--text-lg); font-weight: 600;
+  letter-spacing: 0.02em; white-space: nowrap;
+}
 .brand .phase {
   font-family: var(--font-body); font-size: var(--text-xs);
   color: var(--slate); margin-left: var(--space-2); font-weight: 400;
@@ -77,7 +97,9 @@ body {
 }
 #nav button:hover { border-color: var(--archive); color: var(--ink); }
 #nav button[aria-current="true"] {
-  color: var(--ink); border-color: var(--signal); background: #FFF7F0;
+  color: var(--ink); background: #FBF3EC;
+  border-color: transparent; box-shadow: inset 0 -2px 0 var(--signal);
+  font-weight: 600;
 }
 #nav button .idx { font-family: var(--font-data); font-size: var(--text-xs); opacity: .55; margin-right: 4px; }
 
@@ -90,7 +112,7 @@ button.primary {
 button.primary:disabled { opacity: .5; cursor: wait; }
 .run-status { font-size: var(--text-xs); color: var(--slate); font-family: var(--font-data); }
 
-main { padding: var(--space-6) var(--space-4) var(--space-8); max-width: 1500px; }
+main { padding: var(--space-6) var(--space-6) var(--space-8); max-width: 1500px; }
 
 .chrome-footer {
   display: flex; justify-content: space-between; gap: var(--space-4);
@@ -105,25 +127,63 @@ kbd {
 
 /* ── structure ────────────────────────────────────────────────────────── */
 
-h1 { font-family: var(--font-display); font-size: var(--text-xl); margin: 0 0 var(--space-1); }
-.screen-note { color: var(--slate); font-size: var(--text-sm); margin: 0 0 var(--space-6); max-width: 70ch; }
-h2 { font-size: var(--text-base); margin: var(--space-6) 0 var(--space-2); font-weight: 600; }
+h1 {
+  font-family: var(--font-display); font-size: 1.4rem; font-weight: 600;
+  margin: 0 0 var(--space-1); letter-spacing: 0.01em;
+}
+.screen-note {
+  color: var(--slate); font-size: var(--text-sm); margin: 0 0 var(--space-6);
+  max-width: 78ch; line-height: 1.55;
+}
+h2 {
+  font-size: var(--text-sm); margin: var(--space-6) 0 var(--space-2);
+  font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--slate); border-bottom: 1px solid var(--archive);
+  padding-bottom: var(--space-1);
+}
 
 .tiles { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-bottom: var(--space-6); }
 .tile {
   border: var(--border); border-radius: var(--radius); background: #FFF;
-  padding: var(--space-3) var(--space-4); min-width: 140px;
+  padding: var(--space-3) var(--space-4); min-width: 150px; flex: 1 1 150px;
+  max-width: 240px;
 }
 .tile .k { font-size: var(--text-xs); color: var(--slate); text-transform: uppercase; letter-spacing: .04em; }
-.tile .v { font-family: var(--font-data); font-size: var(--text-xl); }
+.tile .v {
+  font-family: var(--font-data); font-size: 1.75rem; line-height: 1.15;
+  margin: 2px 0 1px;
+}
 .tile .sub { font-size: var(--text-xs); color: var(--slate); }
 
-table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); background: #FFF; }
-th, td { text-align: left; padding: var(--space-2) var(--space-3); border-bottom: var(--border); vertical-align: top; }
-th { font-weight: 600; color: var(--slate); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: .04em; }
+/* Tables are the instrument. D-66: dense, thousands of rows, whitespace for
+   hierarchy rather than air. Wrapped in a panel so a table reads as a bounded
+   object rather than as text that ran out. */
+table {
+  width: 100%; border-collapse: collapse; font-size: var(--text-sm);
+  background: #FFF; border: var(--border); border-radius: var(--radius);
+  overflow: hidden; margin-bottom: var(--space-4);
+}
+th, td {
+  text-align: left; padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid #ECEEEF; vertical-align: top;
+}
+tbody tr:last-child td { border-bottom: none; }
+th {
+  font-weight: 600; color: var(--slate); font-size: var(--text-xs);
+  text-transform: uppercase; letter-spacing: .04em;
+  background: #FAF9F7; border-bottom: 1px solid var(--archive);
+  /* Sticky because the analyst scrolls a long capture list and still needs to
+     know which column is which. */
+  position: sticky; top: 56px; z-index: 1;
+  white-space: nowrap;
+}
 tbody tr[data-row]:hover { background: #FBFAF8; }
-tbody tr.cursor { background: #FFF7F0; outline: 1px solid var(--signal); }
-td.num { font-family: var(--font-data); text-align: right; }
+tbody tr.cursor { background: #FFF7F0; box-shadow: inset 3px 0 0 var(--signal); }
+td.num { font-family: var(--font-data); text-align: right; white-space: nowrap; }
+td .hash, td.hash { color: var(--slate); }
+
+/* Long values (URLs, text) must not force the page to scroll sideways. */
+td { overflow-wrap: anywhere; }
 
 /* D-57: the provenance strip. Never hidden, never collapsed by default. All
    the product's boldness is spent here; everything else stays quiet. */
@@ -162,7 +222,10 @@ td.num { font-family: var(--font-data); text-align: right; }
 /* D-68: three distinct empty states. Showing "no activity" when the truth is
    "we lost the source" leads the analyst to a wrong conclusion — this is the
    single most important correctness rule in the interface. */
-.empty { border: var(--border); border-radius: var(--radius); background: #FFF; padding: var(--space-6); }
+.empty {
+  border: 1px dashed var(--archive); border-radius: var(--radius);
+  background: #FFF; padding: var(--space-6); max-width: 70ch;
+}
 .empty .headline { font-size: var(--text-base); margin-bottom: var(--space-1); }
 .empty .why { color: var(--slate); font-size: var(--text-sm); max-width: 60ch; }
 .empty-measured .headline::before  { content: "— "; color: var(--slate); }
