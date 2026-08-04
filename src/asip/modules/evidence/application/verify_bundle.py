@@ -159,6 +159,22 @@ class VerifyBundle:
         if not stored.timestamps:
             return ([f"bundle {stored.record.bundle_id} has no RFC 3161 token yet"], False)
 
+        # A token nobody here can check is not a token that failed. If the
+        # authority's certificate is not configured, or the installed library
+        # cannot handle its signature algorithm, the honest answer is
+        # "unconfirmed" — reporting FAILED would tell an analyst their evidence
+        # had been tampered with when the only thing wrong is our configuration.
+        if not self._tsa.can_verify():
+            return (
+                [
+                    f"bundle {stored.record.bundle_id} carries "
+                    f"{len(stored.timestamps)} RFC 3161 token(s) that could not be "
+                    "checked here: no authority certificate is configured for "
+                    "verification. The tokens are stored and remain checkable."
+                ],
+                False,
+            )
+
         problems: list[str] = []
         for stamp in stored.timestamps:
             if stamp.manifest_sha256 != stored.record.manifest_sha256:

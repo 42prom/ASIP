@@ -1,0 +1,1 @@
+DROP SCHEMA IF EXISTS sch_collection CASCADE;

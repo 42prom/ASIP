@@ -1,0 +1,43 @@
+<!doctype html>
+<!--
+  ASIP analyst console — walking skeleton.
+
+  A case file, not a dashboard (D-56). No threat gauges, no red alarm palette.
+  Colour encodes status and confidence only, never stance (D-59).
+
+  DELIBERATE DEVIATION FROM D-70, recorded rather than hidden: this is vanilla
+  HTML and JavaScript, not React + Cytoscape. The JSON API is the real
+  contract, and the console is a view over it — every screen here reads an
+  endpoint that a React client would read identically. A build toolchain is a
+  moving part (CLAUDE.md §3) and adding one before the pipeline works would
+  mean debugging two new things at once. This is expected to be replaced once
+  the graph view needs real interaction, and nothing below the API changes when
+  it is.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ASIP — analyst console</title>
+  <link rel="stylesheet" href="/static/console.css">
+</head>
+<body>
+  <header class="chrome">
+    <div class="brand">ASIP<span class="phase">walking skeleton</span></div>
+    <nav id="nav"></nav>
+    <div class="chrome-actions">
+      <button id="run-pipeline" class="primary">Run pipeline</button>
+      <span id="run-status" class="run-status"></span>
+    </div>
+  </header>
+
+  <main id="screen" aria-live="polite"></main>
+
+  <footer class="chrome-footer">
+    <span class="hash" id="tenant-note">single tenant · dev profile</span>
+    <span>Keyboard: <kbd>g</kbd> then a screen number · <kbd>j</kbd>/<kbd>k</kbd> to move · <kbd>r</kbd> to run</span>
+  </footer>
+
+  <script src="/static/console.js"></script>
+</body>
+</html>

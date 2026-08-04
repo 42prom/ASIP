@@ -73,6 +73,9 @@ class OfflineTsa:
     def verify(self, digest_hex: str, token: bytes) -> bool:
         return False
 
+    def can_verify(self) -> bool:
+        return True
+
 
 @pytest.fixture
 def writer(archive: WarcBundleArchive, repository: PostgresEvidenceRepository) -> WriteBundle:

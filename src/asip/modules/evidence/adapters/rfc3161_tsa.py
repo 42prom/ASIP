@@ -65,16 +65,37 @@ class Rfc3161TimestampAuthority:
         self._url = url
         self._certificate = certificate
         self._hashname = hashname
+        # Constructed WITHOUT the certificate on purpose. rfc3161ng verifies
+        # automatically inside __call__ when it holds one, which couples
+        # obtaining a token to checking it — and a verification failure then
+        # surfaces as "could not stamp", losing a token we successfully got.
+        # Acquisition and verification are separate concerns and separate
+        # methods here.
         self._timestamper: Any = rfc3161ng.RemoteTimestamper(
-            url,
-            certificate=certificate,
-            hashname=hashname,
-            timeout=timeout,
+            url, hashname=hashname, timeout=timeout
         )
+        self._verification_works: bool | None = None
 
     @property
     def url(self) -> str:
         return self._url
+
+    def can_verify(self) -> bool:
+        """Whether this adapter can actually check a token right now.
+
+        Two conditions, and both are about capability rather than validity:
+        the authority's certificate must be configured, and the installed
+        library must be able to check that certificate's signature algorithm.
+
+        The second is not hypothetical. rfc3161ng 2.1.3 calls
+        ``ECPublicKey.verify()`` with four positional arguments; current
+        ``cryptography`` accepts three. Any authority signing with an EC key —
+        FreeTSA among them — cannot be verified by this library. Probing for it
+        rather than assuming means a bundle carrying a genuine token is
+        recorded as pending, not as failed. Calling it failed would read as
+        evidence of tampering caused by a dependency's version skew.
+        """
+        return self._certificate is not None and self._verification_works is not False
 
     def stamp(self, digest_hex: str) -> bytes:
         """Obtain a token over the manifest digest.
@@ -112,6 +133,14 @@ class Rfc3161TimestampAuthority:
                 digest=binascii.unhexlify(digest_hex),
                 hashname=self._hashname,
             )
+        except TypeError:
+            # The library cannot check this certificate's signature algorithm
+            # at all — see can_verify. Records the incapacity so the caller
+            # reports the bundle as pending rather than as a failed check, and
+            # returns False because we have emphatically not verified anything.
+            self._verification_works = False
+            return False
         except Exception:
             return False
+        self._verification_works = True
         return bool(result)

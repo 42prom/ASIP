@@ -1,0 +1,80 @@
+<!doctype html>
+<!--
+  The canary source (C-08).
+
+  A page we control, served by the application and fetched over real HTTP on
+  exactly the same path as any other source. Two reasons it exists:
+
+  1. The pipeline is demonstrable without pointing a collector at somebody
+     else's website. No terms of service question, no robots question, no
+     ambiguity about authorisation.
+  2. When collection breaks, the canary tells you instantly whether the fault
+     is ours or theirs. If the canary still parses and a real source does not,
+     they changed. If the canary fails too, we broke it.
+
+  The markup carries data-asip-* attributes because the skeleton's extractor
+  targets a known shape rather than a real platform's DOM. A real extractor is
+  a golden-fixture exercise per platform (D-88.1), and writing one before the
+  pipe works would be guessing twice.
+
+  The timestamps below are deliberately inside a two-minute window across five
+  distinct accounts, so the naive burst rule fires and the whole pipeline —
+  including a finding and a STIX export — is visible on the first run.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ASIP canary source</title>
+</head>
+<body>
+  <h1>ASIP canary source</h1>
+  <p>Synthetic content. No real accounts, no real people, no scraped data.</p>
+
+  <div data-asip-item="canary-001"
+       data-asip-author="synthetic_alpha"
+       data-asip-display-name="Alpha (synthetic)"
+       data-asip-posted-at="2026-08-04T09:12:04Z">
+    The new bridge project timeline looks unrealistic to me.
+  </div>
+
+  <div data-asip-item="canary-002"
+       data-asip-author="synthetic_beta"
+       data-asip-display-name="Beta (synthetic)"
+       data-asip-posted-at="2026-08-04T09:12:19Z">
+    The new bridge project timeline looks unrealistic to me.
+  </div>
+
+  <div data-asip-item="canary-003"
+       data-asip-author="synthetic_gamma"
+       data-asip-display-name="Gamma (synthetic)"
+       data-asip-posted-at="2026-08-04T09:12:31Z">
+    ეს ხიდის პროექტის ვადები არარეალისტურად გამოიყურება.
+  </div>
+
+  <div data-asip-item="canary-004"
+       data-asip-author="synthetic_delta"
+       data-asip-display-name="Delta (synthetic)"
+       data-asip-posted-at="2026-08-04T09:12:47Z">
+    The new bridge project timeline looks unrealistic to me.
+  </div>
+
+  <div data-asip-item="canary-005"
+       data-asip-author="synthetic_epsilon"
+       data-asip-display-name="Epsilon (synthetic)"
+       data-asip-posted-at="2026-08-04T09:13:02Z">
+    Timeline seems off. Who signed this contract?
+  </div>
+
+  <!--
+    A sixth item well outside the window. Present so the rule has something to
+    correctly *not* include: a rule that groups everything is indistinguishable
+    from a rule that groups nothing.
+  -->
+  <div data-asip-item="canary-006"
+       data-asip-author="synthetic_zeta"
+       data-asip-display-name="Zeta (synthetic)"
+       data-asip-posted-at="2026-08-04T14:40:11Z">
+    Unrelated later comment about the weather.
+  </div>
+</body>
+</html>

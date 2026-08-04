@@ -183,7 +183,19 @@ class WriteBundle:
             # exception all mean the same thing here — no external token yet.
             return TsaStatus.PENDING, ()
 
-        if not self._tsa.verify(digest, token):
+        # A token we cannot check is not a token that failed. Without the
+        # authority's certificate there is nothing to check the signature
+        # against, so the honest state is "attested, not yet validated" — the
+        # token is real and is stored, and verification happens once the
+        # certificate is configured. Recording it as FAILED would read as
+        # evidence of tampering where none exists.
+        # Attempt first, then ask whether the attempt was even possible. An
+        # authority whose signature algorithm the installed library cannot
+        # check reports its incapacity during the attempt, and only then can
+        # "rejected" be told apart from "unable to check".
+        verified = self._tsa.verify(digest, token)
+        verifiable = self._tsa.can_verify()
+        if verifiable and not verified:
             return TsaStatus.FAILED, ()
 
         stamp = TimestampRecord(
@@ -195,4 +207,4 @@ class WriteBundle:
             obtained_at=self._clock.now(),
         )
         self._repository.append_timestamp(stamp)
-        return TsaStatus.VERIFIED, (stamp,)
+        return (TsaStatus.VERIFIED if verifiable else TsaStatus.PENDING), (stamp,)

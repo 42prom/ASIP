@@ -107,6 +107,20 @@ class TimestampAuthority(Protocol):
 
     def verify(self, digest_hex: str, token: bytes) -> bool: ...
 
+    def can_verify(self) -> bool:
+        """Whether this authority is able to check a token at all.
+
+        Verification needs the authority's certificate. Without it, ``verify``
+        must return False — but that False means "cannot check", not "checked
+        and it disagreed", and conflating the two is a real error: a bundle
+        holding a genuine external token would be recorded as tsa_failed, which
+        reads as evidence of tampering.
+
+        Callers use this to tell the two apart. A token that cannot be checked
+        yet is pending; only a token that has been checked and rejected fails.
+        """
+        ...
+
 
 class EvidenceRepository(Protocol):
     """Append-only storage for bundles, the hash chain, and TSA tokens (D-21).

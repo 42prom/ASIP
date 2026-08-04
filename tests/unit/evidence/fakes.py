@@ -172,6 +172,9 @@ class FakeTimestampAuthority:
     def verify(self, digest_hex: str, token: bytes) -> bool:
         return token == b"tsa:" + digest_hex.encode()
 
+    def can_verify(self) -> bool:
+        return True
+
 
 class FixedClock:
     def __init__(self, moment: datetime | None = None) -> None:

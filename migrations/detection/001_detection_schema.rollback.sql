@@ -1,0 +1,1 @@
+DROP SCHEMA IF EXISTS sch_detection CASCADE;

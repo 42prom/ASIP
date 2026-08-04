@@ -40,6 +40,20 @@ CREATE TABLE IF NOT EXISTS sch_migrations.applied (
     applied_at  timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (module, version)
 );
+
+-- The application reads this ledger and never writes it. "Which migrations are
+-- applied" is the first question a health check asks, and a health check that
+-- cannot see the answer reports a database problem that does not exist —
+-- exactly the silent-degradation failure D-87 is about. Read-only: migrations
+-- are applied by the owner role, not by the application.
+DO $grant$
+BEGIN
+    IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'asip_app') THEN
+        GRANT USAGE ON SCHEMA sch_migrations TO asip_app;
+        GRANT SELECT ON sch_migrations.applied TO asip_app;
+    END IF;
+END
+$grant$;
 """
 
 

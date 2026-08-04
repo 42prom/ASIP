@@ -26,7 +26,7 @@ LINT_IMPORTS := $(BIN)/lint-imports$(EXE)
 
 .PHONY: help install \
         lint layers test test-contracts test-independence test-isolation check \
-        migrate migrate-status seed-dev test-fixtures validate-stix \
+        migrate migrate-status seed-dev run pipeline test-fixtures validate-stix \
         verify-chain check-schemas evidence-roundtrip chain-verify-full \
         test-integration \
         shadow-run measure-precision spike0-fetch spike0-report corpus eval
@@ -89,9 +89,20 @@ else
 endif
 
 seed-dev:
-	@echo NOT IMPLEMENTED: seed-dev — no schema to seed. >&2
-	@echo   Lands in Phase 1 with fixture tenants and sources. >&2
-	@exit 1
+	$(PY) -m asip.entrypoints.seed
+
+# The whole point of this phase: open the application and watch it work.
+#   docker compose up -d postgres minio
+#   make migrate ASIP_DB_URL=...
+#   make seed-dev
+#   make run          then open http://127.0.0.1:8000 and press "Run pipeline"
+run:
+	$(PY) -m uvicorn asip.entrypoints.api:app --host 127.0.0.1 --port 8000 --reload
+
+# One pass of the pipeline from the command line, for when the console is not
+# the point. Same code path the console's button calls.
+pipeline:
+	$(PY) -c "import urllib.request as u; print(u.urlopen(u.Request('http://127.0.0.1:8000/api/pipeline/run', method='POST')).read().decode())"
 
 # ─── Test suites — land with the code they gate ─────────────────────────────
 
