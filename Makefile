@@ -26,7 +26,7 @@ LINT_IMPORTS := $(BIN)/lint-imports$(EXE)
 
 .PHONY: help install \
         lint layers test test-contracts test-independence test-isolation check \
-        migrate migrate-status seed-dev run run-fetcher pipeline test-fixtures validate-stix \
+        migrate migrate-status seed-dev reset-dev run run-fetcher pipeline test-fixtures \n        validate-stix \
         verify-chain check-schemas evidence-roundtrip chain-verify-full \
         test-integration \
         shadow-run measure-precision spike0-fetch spike0-report corpus eval
@@ -90,6 +90,19 @@ endif
 
 seed-dev:
 	$(PY) -m asip.entrypoints.seed
+
+# Drop every schema and start clean. Development only — it refuses to run
+# unless ASIP_PROFILE is dev or sandbox, and requires an awkward confirmation,
+# because it destroys evidence and the hash chain.
+reset-dev:
+ifndef ASIP_DB_URL
+	@echo NOT RUN: reset-dev needs ASIP_DB_URL. >&2
+	@exit 1
+else
+	$(PY) -m asip.entrypoints.reset_dev --dsn "$(ASIP_DB_URL)" --confirm destroy-all-evidence
+	$(PY) -m asip.entrypoints.migrate --dsn "$(ASIP_DB_URL)"
+	$(PY) -m asip.entrypoints.seed
+endif
 
 # The whole point of this phase: open the application and watch it work.
 #   docker compose up -d postgres minio

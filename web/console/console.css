@@ -77,8 +77,8 @@ body {
   border-bottom: 1px solid var(--archive);
   background: #FFF;
   position: sticky; top: 0; z-index: 10;
-  flex-wrap: wrap;
-  min-height: 56px;
+  flex-wrap: nowrap;
+  min-height: 52px;
   box-shadow: 0 1px 0 rgba(20, 24, 29, 0.04);
 }
 .brand {
@@ -89,11 +89,17 @@ body {
   font-family: var(--font-body); font-size: var(--text-xs);
   color: var(--slate); margin-left: var(--space-2); font-weight: 400;
 }
-#nav { display: flex; gap: var(--space-1); flex-wrap: wrap; flex: 1; }
+#nav {
+  display: flex; gap: 2px; flex: 1 1 auto; min-width: 0;
+  overflow-x: auto; scrollbar-width: thin;
+}
+#nav::-webkit-scrollbar { height: 4px; }
+#nav::-webkit-scrollbar-thumb { background: var(--archive); border-radius: 2px; }
 #nav button {
   background: none; border: 1px solid transparent; border-radius: var(--radius);
-  padding: var(--space-1) var(--space-3);
+  padding: var(--space-1) var(--space-2);
   font: inherit; font-size: var(--text-sm); color: var(--slate); cursor: pointer;
+  white-space: nowrap; flex: 0 0 auto;
 }
 #nav button:hover { border-color: var(--archive); color: var(--ink); }
 #nav button[aria-current="true"] {
@@ -161,22 +167,27 @@ h2 {
 table {
   width: 100%; border-collapse: collapse; font-size: var(--text-sm);
   background: #FFF; border: var(--border); border-radius: var(--radius);
-  overflow: hidden; margin-bottom: var(--space-4);
+  margin-bottom: var(--space-4);
 }
 th, td {
   text-align: left; padding: var(--space-2) var(--space-3);
   border-bottom: 1px solid #ECEEEF; vertical-align: top;
 }
 tbody tr:last-child td { border-bottom: none; }
+tbody:empty::after { content: ""; display: block; }
 th {
   font-weight: 600; color: var(--slate); font-size: var(--text-xs);
   text-transform: uppercase; letter-spacing: .04em;
   background: #FAF9F7; border-bottom: 1px solid var(--archive);
-  /* Sticky because the analyst scrolls a long capture list and still needs to
-     know which column is which. */
-  position: sticky; top: 56px; z-index: 1;
   white-space: nowrap;
 }
+/* No sticky header here, deliberately. The first attempt pinned <th> at a
+   fixed offset from the viewport; the chrome's height changes when the nav
+   wraps, so the header floated over the first data rows and made a populated
+   table look empty. A sticky header needs its own scroll container to be
+   correct, and a wrong one is worse than none — it hides data while looking
+   deliberate. Revisit with a proper scrolling table body when row counts
+   justify it (D-66). */
 tbody tr[data-row]:hover { background: #FBFAF8; }
 tbody tr.cursor { background: #FFF7F0; box-shadow: inset 3px 0 0 var(--signal); }
 td.num { font-family: var(--font-data); text-align: right; white-space: nowrap; }

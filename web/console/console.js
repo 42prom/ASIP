@@ -39,9 +39,17 @@ const el = (tag, attrs = {}, ...children) => {
   return node;
 };
 
-/* D-65: times are UTC ISO 8601. Local time only ever in parentheses, and the
-   console never invents a format of its own. */
-const ts = (value) => (value ? String(value).replace("T", " ").replace("Z", "Z") : "—");
+/* D-65: times are UTC ISO 8601, and only ever UTC here.
+ *
+ * Trimmed to whole seconds. The API sends microseconds, which is right for the
+ * record and wrong for a column an analyst scans: six trailing digits that
+ * differ on every row defeat the comparison the column exists to support.
+ * Nothing is lost — the stored value keeps full precision, and the evidence
+ * timestamps that matter are the TSA's, not ours. */
+const ts = (value) => {
+  if (!value) return "—";
+  return String(value).replace("T", " ").replace(/\.\d+Z$/, "Z");
+};
 const shortHash = (value) => (value ? String(value).slice(0, 12) : "—");
 
 /* D-68. Three states, and the caller must say which one applies. A generic

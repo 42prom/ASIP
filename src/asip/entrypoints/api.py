@@ -586,6 +586,45 @@ def health() -> JSONResponse:
     except Exception as exc:
         checks.append({"name": "chain_anchoring", "status": "failed", "detail": str(exc)})
 
+    # V-5, checked rather than assumed.
+    #
+    # The CHECK constraint on findings enforces that evidence_refs is non-empty.
+    # It cannot enforce that the referenced bundles exist, because the obvious
+    # mechanism — a foreign key from sch_detection to sch_evidence — would
+    # couple two modules that D-99 requires to be independently removable. So
+    # the reference is verified rather than constrained, and the verification
+    # has to be visible or it is not a control at all.
+    #
+    # A non-zero count here means findings resting on evidence nobody can
+    # produce, which is precisely the condition V-5 exists to prevent.
+    try:
+        with session() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM sch_detection.findings f "
+                " WHERE f.tenant_id = %(t)s AND EXISTS ("
+                "   SELECT 1 FROM unnest(f.evidence_refs) r "
+                "    WHERE NOT EXISTS ("
+                "      SELECT 1 FROM sch_evidence.evidence_bundles b "
+                "       WHERE b.tenant_id = f.tenant_id AND b.bundle_id = r))",
+                {"t": DEFAULT_TENANT},
+            )
+            dangling = (cur.fetchone() or (0,))[0]
+        checks.append(
+            {
+                "name": "evidence_references",
+                "status": "ok" if dangling == 0 else "failed",
+                "detail": (
+                    "Every finding's evidence resolves to a stored bundle."
+                    if dangling == 0
+                    else f"{dangling} finding(s) reference evidence bundles that cannot "
+                    "be found. V-5 requires a finding to rest on evidence; these rest "
+                    "on identifiers that resolve to nothing and cannot be defended."
+                ),
+            }
+        )
+    except Exception as exc:
+        checks.append({"name": "evidence_references", "status": "failed", "detail": str(exc)})
+
     queue_url = os.environ.get("ASIP_FETCH_QUEUE_URL")
     if not queue_url:
         checks.append(
