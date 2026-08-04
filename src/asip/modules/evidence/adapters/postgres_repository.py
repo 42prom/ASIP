@@ -113,6 +113,75 @@ class PostgresEvidenceRepository:
                 ),
             )
 
+    def append_anchor(self, anchor: Any) -> None:
+        """Store an external attestation of the chain head (D-90).
+
+        No ON CONFLICT clause: a second anchor for the same head at the same
+        instant from the same authority is a duplicate write, and failing loudly
+        is better than silently keeping one of two things that should be
+        identical but might not be.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO sch_evidence.chain_anchors
+                    (tenant_id, anchored_at, chain_index, entry_hash, algorithm,
+                     authority_url, token)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    anchor.tenant_id,
+                    anchor.anchored_at,
+                    anchor.chain_index,
+                    anchor.entry_hash,
+                    anchor.algorithm,
+                    anchor.authority_url,
+                    anchor.token,
+                ),
+            )
+
+    def latest_anchor(self, tenant_id: UUID) -> Any | None:
+        from asip.modules.evidence.application.anchor_chain import AnchorRecord
+
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT tenant_id, anchored_at, chain_index, entry_hash, algorithm,
+                       authority_url, token
+                  FROM sch_evidence.chain_anchors
+                 WHERE tenant_id = %s
+                 ORDER BY chain_index DESC, anchored_at DESC
+                 LIMIT 1
+                """,
+                (tenant_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return AnchorRecord(
+            tenant_id=row[0],
+            anchored_at=row[1],
+            chain_index=row[2],
+            entry_hash=row[3],
+            algorithm=row[4],
+            authority_url=row[5],
+            token=bytes(row[6]),
+        )
+
+    def anchors(self, tenant_id: UUID, limit: int = 50) -> list[dict[str, Any]]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT anchored_at, chain_index, entry_hash, algorithm, authority_url,
+                       octet_length(token) AS token_bytes
+                  FROM sch_evidence.chain_anchors
+                 WHERE tenant_id = %s ORDER BY anchored_at DESC LIMIT %s
+                """,
+                (tenant_id, limit),
+            )
+            columns = [d[0] for d in cur.description or ()]
+            return [dict(zip(columns, row, strict=True)) for row in cur.fetchall()]
+
     # ── reads ───────────────────────────────────────────────────────────────
 
     def head(self, tenant_id: UUID) -> ChainEntry | None:

@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from asip.contracts.evidence import (
@@ -116,6 +117,7 @@ class FakeRepository:
     bundles: dict[tuple[UUID, UUID], BundleRecord] = field(default_factory=dict)
     chains: dict[UUID, list[ChainEntry]] = field(default_factory=dict)
     stamps: dict[tuple[UUID, UUID], list[TimestampRecord]] = field(default_factory=dict)
+    anchors: dict[UUID, list[Any]] = field(default_factory=dict)
     commit_calls: int = 0
     fail_commit: bool = False
 
@@ -147,6 +149,13 @@ class FakeRepository:
             chain_entry=entry,
             timestamps=tuple(self.stamps.get((tenant_id, bundle_id), ())),
         )
+
+    def append_anchor(self, anchor: Any) -> None:
+        self.anchors.setdefault(anchor.tenant_id, []).append(anchor)
+
+    def latest_anchor(self, tenant_id: UUID) -> Any | None:
+        found = self.anchors.get(tenant_id)
+        return max(found, key=lambda a: a.chain_index) if found else None
 
     def replace_chain_entry(self, tenant_id: UUID, index: int, entry: ChainEntry) -> None:
         """Tamper hook. No production path may do this."""

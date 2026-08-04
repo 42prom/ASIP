@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
 import psycopg
 
@@ -27,8 +28,29 @@ from asip.modules.evidence.adapters.postgres_repository import PostgresEvidenceR
 from asip.modules.evidence.adapters.rfc3161_tsa import Rfc3161TimestampAuthority
 from asip.modules.evidence.adapters.s3_object_store import S3ObjectStore
 from asip.modules.evidence.adapters.warc_archive import WarcBundleArchive
+from asip.modules.evidence.application.anchor_chain import AnchorChain
 from asip.modules.evidence.application.verify_bundle import VerifyBundle
 from asip.modules.evidence.application.write_bundle import WriteBundle
+
+#: Shipped certificates for the development authority. Public artifacts, so
+#: they live in the repository rather than the secrets manager — anyone
+#: verifying our evidence needs exactly these.
+_CONFIG = Path(__file__).resolve().parents[3] / "config" / "tsa"
+DEFAULT_TSA_CERT = str(_CONFIG / "freetsa-tsa.crt")
+DEFAULT_TSA_ROOTS = str(_CONFIG / "freetsa-cacert.pem")
+
+
+def _read_optional(path: str | None) -> bytes | None:
+    """Read a certificate if it is there. A missing one is not an error.
+
+    A deployment pointed at another authority supplies its own; one that has
+    not configured verification yet still runs, and reports its bundles as
+    unconfirmed rather than pretending or crashing.
+    """
+    if not path:
+        return None
+    candidate = Path(path)
+    return candidate.read_bytes() if candidate.is_file() else None
 
 
 @dataclass(frozen=True)
@@ -42,7 +64,11 @@ class Settings:
     object_store_secret: str
     object_store_bucket: str
     tsa_url: str
+    #: The authority's own certificate, and the roots it chains to. Both are
+    #: public artifacts, not secrets — they are what lets anyone else check the
+    #: same token, which is the point of using an external authority at all.
     tsa_certificate: bytes | None = None
+    tsa_roots: bytes | None = None
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -54,6 +80,8 @@ class Settings:
             object_store_secret=os.environ["ASIP_OBJECT_STORE_SECRET"],
             object_store_bucket=os.environ.get("ASIP_OBJECT_STORE_BUCKET", "asip-evidence"),
             tsa_url=os.environ["ASIP_TSA_URL"],
+            tsa_certificate=_read_optional(os.environ.get("ASIP_TSA_CERT", DEFAULT_TSA_CERT)),
+            tsa_roots=_read_optional(os.environ.get("ASIP_TSA_ROOTS", DEFAULT_TSA_ROOTS)),
         )
 
 
@@ -63,6 +91,7 @@ class EvidenceContainer:
 
     write_bundle: WriteBundle
     verify_bundle: VerifyBundle
+    anchor_chain: AnchorChain
 
 
 class SystemClock:
@@ -92,11 +121,16 @@ def build_evidence(settings: Settings, connection: psycopg.Connection) -> Eviden
     )
     archive = WarcBundleArchive(object_store)
     repository = PostgresEvidenceRepository(connection)
-    tsa = Rfc3161TimestampAuthority(settings.tsa_url, certificate=settings.tsa_certificate)
+    tsa = Rfc3161TimestampAuthority(
+        settings.tsa_url,
+        certificate=settings.tsa_certificate,
+        roots=settings.tsa_roots,
+    )
 
     return EvidenceContainer(
         write_bundle=WriteBundle(archive, repository, tsa, SystemClock(), settings.tsa_url),
         verify_bundle=VerifyBundle(archive, repository, tsa),
+        anchor_chain=AnchorChain(repository, tsa, SystemClock(), settings.tsa_url),
     )
 
 

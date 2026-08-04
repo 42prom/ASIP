@@ -26,6 +26,10 @@ dependencies = [
   "psycopg[binary]>=3.2",
   "boto3>=1.35",
   "rfc3161ng>=2.1",
+  # Verification, separately from acquisition. rfc3161ng cannot check EC-signed
+  # tokens against current cryptography, which rules out FreeTSA and any other
+  # authority using an EC key. See adapters/rfc3161_tsa.py.
+  "rfc3161-client>=1.0",
   # The console and the pipeline trigger. FastAPI because §10.1 names it, and
   # because the JSON API is the real contract — the console is a view over it
   # and is replaceable without touching anything below.
@@ -85,7 +89,7 @@ no_implicit_optional = true
 # untyped import appearing anywhere else should still be an error. Nothing here
 # affects L1 — the domain layer imports none of them, by contract.
 [[tool.mypy.overrides]]
-module = ["warcio.*", "boto3.*", "botocore.*", "rfc3161ng.*"]
+module = ["warcio.*", "boto3.*", "botocore.*", "rfc3161ng.*", "pyasn1.*"]
 ignore_missing_imports = true
 
 # L1 domain is the layer that must never be loosened. It has no I/O, so there

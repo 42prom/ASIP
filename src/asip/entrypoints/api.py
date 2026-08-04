@@ -27,12 +27,19 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from asip.entrypoints.composition import Settings, build_evidence
+from asip.entrypoints.composition import (
+    DEFAULT_TSA_CERT,
+    DEFAULT_TSA_ROOTS,
+    Settings,
+    _read_optional,
+    build_evidence,
+)
 from asip.entrypoints.pipeline import BURST_RULE_NAME, Pipeline
 from asip.modules.collection.adapters.http_fetcher import HttpFetcher
 from asip.modules.collection.adapters.postgres_repository import PostgresCollectionRepository
 from asip.modules.detection.adapters.postgres_repository import PostgresDetectionRepository
-from asip.modules.evidence.adapters.warc_archive import WarcBundleArchive
+from asip.modules.evidence.adapters.postgres_repository import PostgresEvidenceRepository
+from asip.modules.evidence.adapters.rfc3161_tsa import FREETSA_URL
 from asip.modules.export.adapters.postgres_repository import PostgresExportRepository
 from asip.modules.extraction.adapters.postgres_repository import PostgresExtractionRepository
 from asip.modules.review.adapters.postgres_repository import VERDICTS, PostgresReviewRepository
@@ -47,6 +54,26 @@ app = FastAPI(title="ASIP", version="0.1.0", docs_url="/api/docs")
 
 def _dsn() -> str:
     return os.environ.get("ASIP_DB_URL", "postgresql://asip:asip_dev_only@127.0.0.1:5432/asip")
+
+
+def _settings() -> Settings:
+    """One place the runtime configuration is assembled.
+
+    Defaults are development values. The TSA certificates default to the
+    shipped FreeTSA ones, so verification works out of the box and a deployment
+    switching authority overrides two environment variables and nothing else.
+    """
+    return Settings(
+        profile=os.environ.get("ASIP_PROFILE", "dev"),
+        db_url=_dsn(),
+        object_store_url=os.environ.get("ASIP_OBJECT_STORE_URL", "http://127.0.0.1:9000"),
+        object_store_key=os.environ.get("ASIP_OBJECT_STORE_KEY", "asip"),
+        object_store_secret=os.environ.get("ASIP_OBJECT_STORE_SECRET", "asip_dev_only"),
+        object_store_bucket=os.environ.get("ASIP_OBJECT_STORE_BUCKET", "asip-evidence"),
+        tsa_url=os.environ.get("ASIP_TSA_URL", FREETSA_URL),
+        tsa_certificate=_read_optional(os.environ.get("ASIP_TSA_CERT", DEFAULT_TSA_CERT)),
+        tsa_roots=_read_optional(os.environ.get("ASIP_TSA_ROOTS", DEFAULT_TSA_ROOTS)),
+    )
 
 
 @contextmanager
@@ -97,15 +124,7 @@ def _json(payload: Any) -> JSONResponse:
 @app.post("/api/pipeline/run")
 def run_pipeline() -> JSONResponse:
     """Run one full pass and return what every stage did."""
-    settings = Settings(
-        profile=os.environ.get("ASIP_PROFILE", "dev"),
-        db_url=_dsn(),
-        object_store_url=os.environ.get("ASIP_OBJECT_STORE_URL", "http://127.0.0.1:9000"),
-        object_store_key=os.environ.get("ASIP_OBJECT_STORE_KEY", "asip"),
-        object_store_secret=os.environ.get("ASIP_OBJECT_STORE_SECRET", "asip_dev_only"),
-        object_store_bucket=os.environ.get("ASIP_OBJECT_STORE_BUCKET", "asip-evidence"),
-        tsa_url=os.environ.get("ASIP_TSA_URL", "https://freetsa.org/tsr"),
-    )
+    settings = _settings()
     with session() as conn:
         container = build_evidence(settings, conn)
         pipeline = Pipeline(conn, container.write_bundle, HttpFetcher(), DEFAULT_TENANT)
@@ -114,6 +133,26 @@ def run_pipeline() -> JSONResponse:
 
 
 # ── read models, one per screen ─────────────────────────────────────────────
+
+
+@app.post("/api/chain/anchor")
+def anchor_chain() -> JSONResponse:
+    """Attest the current chain head to an external authority (D-90).
+
+    Run on a schedule in production. Exposed as a button here because the point
+    of this phase is that everything the system does is visible.
+    """
+    with session() as conn:
+        result = build_evidence(_settings(), conn).anchor_chain.execute(DEFAULT_TENANT)
+    return _json(
+        {"status": result.status, "detail": result.detail, "chain_index": result.chain_index}
+    )
+
+
+@app.get("/api/chain/anchors")
+def list_anchors() -> JSONResponse:
+    with session() as conn:
+        return _json(PostgresEvidenceRepository(conn).anchors(DEFAULT_TENANT))
 
 
 @app.get("/api/dashboard")
@@ -201,7 +240,6 @@ def bundles() -> JSONResponse:
 @app.get("/api/bundles/{bundle_id}")
 def bundle_detail(bundle_id: UUID) -> JSONResponse:
     """The evidence viewer's data, including a live re-verification."""
-    settings_url = os.environ.get("ASIP_OBJECT_STORE_URL", "http://127.0.0.1:9000")
     with session() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -244,40 +282,25 @@ def bundle_detail(bundle_id: UUID) -> JSONResponse:
             ]
 
         record["manifest"] = json.loads(record["manifest"])
-        record["verification"] = _verify(conn, settings_url, record)
+        record["verification"] = _verify(conn, record)
     return _json(record)
 
 
-def _verify(conn: psycopg.Connection, store_url: str, record: dict[str, Any]) -> dict[str, Any]:
+def _verify(conn: psycopg.Connection, record: dict[str, Any]) -> dict[str, Any]:
     """Re-verify on demand — the one-click check the product promises.
 
-    Reported per check rather than as a score. An analyst needs to say which
-    check failed, and "confidence 0.83" is not defensible in print.
+    Built from the same container the pipeline writes with, so the timestamp is
+    genuinely checked against the authority's certificate. An earlier version
+    used a stub that always answered "cannot verify", which made every bundle
+    read as unconfirmed — the product's central claim showing as unproven in
+    the one screen that exists to demonstrate it.
+
+    Reported per check rather than as a score. An analyst needs to name the
+    check that failed, and "confidence 0.83" is not defensible in print.
     """
     from asip.contracts.evidence import BundleRef, TsaStatus
-    from asip.modules.evidence.adapters.postgres_repository import PostgresEvidenceRepository
-    from asip.modules.evidence.adapters.s3_object_store import S3ObjectStore
-    from asip.modules.evidence.application.verify_bundle import VerifyBundle
 
-    class _NoTsa:
-        def stamp(self, digest_hex: str) -> bytes:
-            raise ConnectionError("verification does not issue tokens")
-
-        def verify(self, digest_hex: str, token: bytes) -> bool:
-            return False
-
-        def can_verify(self) -> bool:
-            # Re-verification does not hold the certificate, so it reports the
-            # timestamp as unconfirmed rather than as broken.
-            return False
-
-    store = S3ObjectStore(
-        bucket=os.environ.get("ASIP_OBJECT_STORE_BUCKET", "asip-evidence"),
-        endpoint_url=store_url,
-        access_key=os.environ.get("ASIP_OBJECT_STORE_KEY", "asip"),
-        secret_key=os.environ.get("ASIP_OBJECT_STORE_SECRET", "asip_dev_only"),
-    )
-    verifier = VerifyBundle(WarcBundleArchive(store), PostgresEvidenceRepository(conn), _NoTsa())
+    verifier = build_evidence(_settings(), conn).verify_bundle
     result = verifier.execute(
         BundleRef(
             bundle_id=record["bundle_id"],
@@ -465,27 +488,75 @@ def health() -> JSONResponse:
         checks.append({"name": "object_store", "status": "failed", "detail": str(exc)})
 
     # Deliberately reported as a known gap rather than as a passing check.
-    checks.append(
-        {
-            "name": "timestamp_authority",
-            "status": "unverified",
-            "detail": (
-                "No live RFC 3161 token has been verified end to end. Bundles seal as "
-                "tsa_pending when the authority is unreachable, which is correct, but "
-                "the external attestation is untested against a real authority."
-            ),
-        }
-    )
-    checks.append(
-        {
-            "name": "chain_anchoring",
-            "status": "not_implemented",
-            "detail": (
-                "chain_anchors table exists; the job that writes anchors does not. "
-                "Until it runs, wholesale chain replacement is undetectable."
-            ),
-        }
-    )
+    settings = _settings()
+    if settings.tsa_certificate is None:
+        checks.append(
+            {
+                "name": "timestamp_authority",
+                "status": "unverified",
+                "detail": (
+                    f"{settings.tsa_url} is configured for stamping but no certificate is "
+                    "available, so tokens are stored and cannot be checked here. Bundles "
+                    "read as incomplete rather than verified — correct, but unconfirmed."
+                ),
+            }
+        )
+    else:
+        checks.append(
+            {
+                "name": "timestamp_authority",
+                "status": "ok",
+                "detail": (
+                    f"{settings.tsa_url} configured with a certificate; obtained tokens are "
+                    "verified in process against it."
+                ),
+            }
+        )
+    try:
+        with session() as conn:
+            repository = PostgresEvidenceRepository(conn)
+            latest = repository.latest_anchor(DEFAULT_TENANT)
+            head = repository.head(DEFAULT_TENANT)
+        if head is None:
+            checks.append(
+                {
+                    "name": "chain_anchoring",
+                    "status": "ok",
+                    "detail": "The chain is empty — nothing to anchor yet.",
+                }
+            )
+        elif latest is None:
+            checks.append(
+                {
+                    "name": "chain_anchoring",
+                    "status": "unverified",
+                    "detail": (
+                        f"Chain head is at index {head.chain_index} and has never been "
+                        "anchored. A hash chain detects an edited record but not a chain "
+                        "rebuilt from genesis; until an anchor exists, wholesale "
+                        "replacement is undetectable."
+                    ),
+                }
+            )
+        else:
+            behind = head.chain_index - latest.chain_index
+            checks.append(
+                {
+                    "name": "chain_anchoring",
+                    "status": "ok" if behind == 0 else "stale",
+                    "detail": (
+                        f"Anchored at index {latest.chain_index} via {latest.authority_url}. "
+                        + (
+                            "Head is anchored."
+                            if behind == 0
+                            else f"{behind} entrie(s) written since — those remain rewritable "
+                            "until the next anchor."
+                        )
+                    ),
+                }
+            )
+    except Exception as exc:
+        checks.append({"name": "chain_anchoring", "status": "failed", "detail": str(exc)})
 
     return _json({"checks": checks, "generated_at": datetime.now(UTC)})
 

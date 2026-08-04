@@ -438,6 +438,41 @@ screens.health = {
         el("td", { class: "num" }, r.measured_precision ?? "not measured"))));
     root.append(el("p", { class: "screen-note" },
       "A rule with no measured precision cannot be enabled — the database refuses it (V-4)."));
+
+    root.append(el("h2", {}, "Chain anchoring"));
+    root.append(el("p", { class: "screen-note" },
+      "A hash chain proves nobody edited one record. It does not stop someone with " +
+      "database access rebuilding the chain from genesis — every link consistent, the " +
+      "whole history replaced. An anchor is an external timestamp over the chain head; " +
+      "once one exists, history before it cannot be rewritten undetectably."));
+
+    const anchorBar = el("div", { class: "verdict-actions" },
+      el("button", { onclick: async () => {
+        const status = document.getElementById("anchor-status");
+        status.textContent = "anchoring…";
+        try {
+          const r = await api("/api/chain/anchor", { method: "POST" });
+          status.textContent = `${r.status}: ${r.detail}`;
+          go("health");
+        } catch (error) { status.textContent = `failed: ${error.message}`; }
+      } }, "Anchor chain head now"),
+      el("span", { id: "anchor-status", class: "run-status" }, ""));
+    root.append(anchorBar);
+
+    const anchors = await api("/api/chain/anchors");
+    if (!anchors.length) {
+      root.append(emptyState("notready", "The chain has never been anchored",
+        "Everything written so far is rewritable without detection. This is a real gap, " +
+        "not a cosmetic one — anchor the head to close it."));
+    } else {
+      root.append(table(["Anchored at", "Chain index", "Entry hash", "Authority", "Token"],
+        anchors, (a) => el("tr", { "data-row": "1" },
+          el("td", { class: "timestamp" }, ts(a.anchored_at)),
+          el("td", { class: "num" }, a.chain_index),
+          el("td", { class: "hash" }, shortHash(a.entry_hash)),
+          el("td", {}, a.authority_url),
+          el("td", { class: "num" }, `${a.token_bytes} B`))));
+    }
   },
 };
 

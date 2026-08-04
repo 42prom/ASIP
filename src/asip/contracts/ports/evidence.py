@@ -11,7 +11,7 @@ the published interface and the plan cannot drift apart silently.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 from asip.contracts.evidence import (
@@ -148,6 +148,19 @@ class EvidenceRepository(Protocol):
     def segment(self, tenant_id: UUID, start: int, end: int) -> tuple[ChainEntry, ...]: ...
 
     def load_bundle(self, tenant_id: UUID, bundle_id: UUID) -> StoredBundle | None: ...
+
+    def append_anchor(self, anchor: Any) -> None:
+        """Record an external attestation of the chain head.
+
+        Append-only like the chain itself. Two anchors that disagree about the
+        head at overlapping times is itself the finding, so neither is ever
+        replaced by the other.
+        """
+        ...
+
+    def latest_anchor(self, tenant_id: UUID) -> Any | None:
+        """The most recent anchor, or None if the chain has never been anchored."""
+        ...
 
 
 class EvidenceStore(Protocol):
