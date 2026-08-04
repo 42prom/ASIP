@@ -1,2 +1,0 @@
-D-88.4 cross-tenant read attempts. Empty until the first migration lands an
-RLS policy in Phase 1. See the test-isolation target in the Makefile.

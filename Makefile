@@ -25,8 +25,8 @@ PYTEST := $(PY) -m pytest
 LINT_IMPORTS := $(BIN)/lint-imports$(EXE)
 
 .PHONY: help install \
-        lint layers test test-contracts test-independence check \
-        migrate seed-dev test-fixtures test-isolation validate-stix \
+        lint layers test test-contracts test-independence test-isolation check \
+        migrate migrate-status seed-dev test-fixtures validate-stix \
         verify-chain check-schemas evidence-roundtrip chain-verify-full \
         shadow-run measure-precision spike0-fetch spike0-report corpus eval
 
@@ -63,16 +63,29 @@ test-independence:              ## D-99 remove each module in turn, assert other
 # because a target that always fails trains everyone to ignore the gate.
 check: lint layers test
 	@echo PASSED - lint, layers, test. test-contracts and test-independence run inside test.
-	@echo NOT YET WIRED - test-fixtures, test-isolation, validate-stix, verify-chain, check-schemas.
+	@echo NOT RUN HERE - test-isolation needs a database: make test-isolation ASIP_TEST_DB_URL=...
+	@echo NOT YET WIRED - test-fixtures, validate-stix, verify-chain, check-schemas.
 	@echo These are required by CLAUDE.md section 5 and land with the code they gate.
 
 # ─── Environment — Phase 1 ──────────────────────────────────────────────────
 
 migrate:
-	@echo NOT IMPLEMENTED: migrate — no migrations exist. >&2
-	@echo   Lands in Phase 1 with the first schema. A schema change requires a >&2
-	@echo   partition strategy and an RLS policy in the same migration (CLAUDE.md §4). >&2
+ifndef ASIP_DB_URL
+	@echo NOT RUN: migrate needs ASIP_DB_URL. >&2
+	@echo   Example: make migrate ASIP_DB_URL=postgresql://asip:...@127.0.0.1:5432/asip >&2
+	@echo   Start the database first: docker compose up -d postgres >&2
 	@exit 1
+else
+	$(PY) -m asip.entrypoints.migrate --dsn "$(ASIP_DB_URL)"
+endif
+
+migrate-status:
+ifndef ASIP_DB_URL
+	@echo NOT RUN: migrate-status needs ASIP_DB_URL. >&2
+	@exit 1
+else
+	$(PY) -m asip.entrypoints.migrate --dsn "$(ASIP_DB_URL)" --status
+endif
 
 seed-dev:
 	@echo NOT IMPLEMENTED: seed-dev — no schema to seed. >&2
@@ -87,10 +100,20 @@ test-fixtures:
 	@echo   D-88.1 — run the full set, never filtered. Fixtures are added, never deleted. >&2
 	@exit 1
 
+# D-88.4 / V-7. Requires a real database: RLS cannot be tested against a fake,
+# because the claim is about what the database refuses, not what the
+# application remembers to filter. Fails rather than skips when unconfigured —
+# a security suite that silently passes is worse than no suite.
 test-isolation:
-	@echo NOT IMPLEMENTED: test-isolation — no schema, no RLS, no tenants. >&2
-	@echo   Lands in Phase 1 with the first migration. D-88.4, V-7. >&2
+ifndef ASIP_TEST_DB_URL
+	@echo NOT RUN: test-isolation needs ASIP_TEST_DB_URL and a live database. >&2
+	@echo   docker compose up -d postgres >&2
+	@echo   make test-isolation ASIP_TEST_DB_URL=postgresql://asip:...@127.0.0.1:5432/asip >&2
+	@echo   Skipping this suite silently would defeat its purpose (V-7). >&2
 	@exit 1
+else
+	$(PYTEST) tests/isolation
+endif
 
 validate-stix:
 	@echo NOT IMPLEMENTED: validate-stix — nothing is exported yet. >&2
