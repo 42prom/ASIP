@@ -14,6 +14,9 @@ anyone noticing, and it catches exactly that.
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
+
+import pytest
 
 from asip.modules.collection.adapters import http_fetcher
 from asip.modules.collection.adapters.http_fetcher import HttpFetcher
@@ -81,3 +84,111 @@ def test_declined_responses_are_not_retried() -> None:
     source = inspect.getsource(http_fetcher)
     assert "STATUS_BLOCKED" in source
     assert "exc.code in (401, 403, 429)" in source
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The worker process, not just the fetcher class.
+#
+# The tests above prove HttpFetcher cannot be handed a database. These prove
+# the process that runs it cannot reach one either — which is the difference
+# between a careful constructor and an isolated zone (D-11).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def transitive_imports(module_name: str) -> set[str]:
+    """Every module reachable from one entrypoint, by walking the AST.
+
+    Static rather than dynamic: importing the worker to inspect sys.modules
+    would pull in whatever the test process already loaded, and the question is
+    what the *worker* reaches, not what pytest has.
+    """
+    import ast
+
+    root = Path(__file__).resolve().parents[3] / "src"
+    seen: set[str] = set()
+    queue = [module_name]
+
+    while queue:
+        name = queue.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+
+        path = root / (name.replace(".", "/") + ".py")
+        if not path.is_file():
+            continue
+
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    queue.append(alias.name)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                queue.append(node.module)
+    return seen
+
+
+def test_the_worker_reaches_no_database_library() -> None:
+    """V-3 by import graph.
+
+    Walks everything the worker can reach and asserts no database driver is
+    among it. Adding one — directly or through any module it imports — fails
+    here rather than passing review.
+    """
+    reachable = transitive_imports("asip.entrypoints.fetch_worker")
+    forbidden = {"psycopg", "psycopg2", "sqlalchemy", "asyncpg", "alembic"}
+    found = {m for m in reachable if m.split(".")[0] in forbidden}
+    assert not found, (
+        f"the fetch worker can reach {sorted(found)}. V-3: the fetch zone holds no "
+        "database credentials and cannot reach the core database."
+    )
+
+
+def test_the_worker_reaches_no_evidence_or_detection_module() -> None:
+    """The fetch zone fetches. It does not seal, extract, or decide.
+
+    Reaching into the evidence module from here would mean the fetch zone could
+    write bundles, which is the core's job and needs the database it must not
+    have.
+    """
+    reachable = transitive_imports("asip.entrypoints.fetch_worker")
+    leaked = {
+        m
+        for m in reachable
+        if m.startswith(
+            (
+                "asip.modules.detection",
+                "asip.modules.extraction",
+                "asip.modules.review",
+                "asip.modules.export",
+            )
+        )
+    }
+    assert not leaked, f"the fetch zone reaches {sorted(leaked)}"
+
+
+def test_the_worker_refuses_to_start_with_a_database_credential() -> None:
+    """The likeliest way V-3 breaks is a shared env file, not malice.
+
+    A leaked DSN in the fetch zone's environment is a configuration mistake
+    that would otherwise be silent — the worker would run perfectly and the
+    isolation would be gone.
+    """
+    from asip.entrypoints import fetch_worker
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("ASIP_DB_URL", "postgresql://someone@somewhere/asip")
+        assert fetch_worker.main([]) == 2
+
+
+def test_the_compose_fetch_network_excludes_postgres() -> None:
+    """The routing fact, asserted against the file that establishes it."""
+    compose = (Path(__file__).resolve().parents[3] / "docker-compose.yml").read_text(
+        encoding="utf-8"
+    )
+    postgres_block = compose.split("  postgres:")[1].split("  redis:")[0]
+    assert "fetch" not in postgres_block, (
+        "postgres is attached to the fetch network. V-3: the fetch zone must have no "
+        "route to the core database."
+    )
+    assert "networks: [fetch]" in compose, "the fetcher service is not isolated"

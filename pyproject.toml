@@ -30,6 +30,10 @@ dependencies = [
   # tokens against current cryptography, which rules out FreeTSA and any other
   # authority using an EC key. See adapters/rfc3161_tsa.py.
   "rfc3161-client>=1.0",
+  # The queue between the core and the fetch zone. Redis because it is already
+  # in the stack (§10.1) and because the boundary needs a message broker, not a
+  # workflow engine — Temporal orchestrates the core, not this hop.
+  "redis>=5.0",
   # The console and the pipeline trigger. FastAPI because §10.1 names it, and
   # because the JSON API is the real contract — the console is a view over it
   # and is replaceable without touching anything below.
@@ -89,7 +93,7 @@ no_implicit_optional = true
 # untyped import appearing anywhere else should still be an error. Nothing here
 # affects L1 — the domain layer imports none of them, by contract.
 [[tool.mypy.overrides]]
-module = ["warcio.*", "boto3.*", "botocore.*", "rfc3161ng.*", "pyasn1.*"]
+module = ["warcio.*", "boto3.*", "botocore.*", "rfc3161ng.*", "pyasn1.*", "redis.*"]
 ignore_missing_imports = true
 
 # L1 domain is the layer that must never be loosened. It has no I/O, so there

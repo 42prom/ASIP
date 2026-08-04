@@ -76,6 +76,34 @@ def _settings() -> Settings:
     )
 
 
+def _fetcher(settings: Settings) -> Any:
+    """Pick the fetch adapter. The pipeline never learns which it got.
+
+    With a queue configured, fetching happens in the isolated fetch zone — a
+    separate process on a network with no route to Postgres (D-11, V-3). With
+    no queue, it happens in this process, which is convenient for development
+    and is the weaker arrangement: the credential boundary holds either way,
+    but only the queued path has a process and network boundary too.
+    """
+    queue_url = os.environ.get("ASIP_FETCH_QUEUE_URL")
+    if not queue_url:
+        return HttpFetcher()
+
+    from asip.modules.collection.adapters.queued_fetcher import QueuedFetcher
+    from asip.modules.collection.adapters.redis_fetch_queue import RedisFetchQueue
+    from asip.modules.evidence.adapters.s3_object_store import S3ObjectStore
+
+    return QueuedFetcher(
+        RedisFetchQueue(queue_url),
+        S3ObjectStore(
+            bucket=os.environ.get("ASIP_FETCH_BUCKET", "asip-captures"),
+            endpoint_url=settings.object_store_url,
+            access_key=settings.object_store_key,
+            secret_key=settings.object_store_secret,
+        ),
+    )
+
+
 @contextmanager
 def session() -> Iterator[psycopg.Connection]:
     """A connection scoped to one tenant, as the application role.
@@ -127,7 +155,7 @@ def run_pipeline() -> JSONResponse:
     settings = _settings()
     with session() as conn:
         container = build_evidence(settings, conn)
-        pipeline = Pipeline(conn, container.write_bundle, HttpFetcher(), DEFAULT_TENANT)
+        pipeline = Pipeline(conn, container.write_bundle, _fetcher(settings), DEFAULT_TENANT)
         result = pipeline.run()
     return _json(result.as_dict())
 
@@ -557,6 +585,56 @@ def health() -> JSONResponse:
             )
     except Exception as exc:
         checks.append({"name": "chain_anchoring", "status": "failed", "detail": str(exc)})
+
+    queue_url = os.environ.get("ASIP_FETCH_QUEUE_URL")
+    if not queue_url:
+        checks.append(
+            {
+                "name": "fetch_zone",
+                "status": "unverified",
+                "detail": (
+                    "Fetching runs in this process. The credential boundary holds — the "
+                    "fetcher is constructed with no database access — but there is no "
+                    "process or network boundary. Set ASIP_FETCH_QUEUE_URL and run the "
+                    "fetcher container for the isolation D-11 describes."
+                ),
+            }
+        )
+    else:
+        try:
+            from asip.modules.collection.adapters.redis_fetch_queue import RedisFetchQueue
+
+            queue = RedisFetchQueue(queue_url)
+            workers = queue.live_workers()
+            pending = queue.pending_jobs()
+            if workers:
+                checks.append(
+                    {
+                        "name": "fetch_zone",
+                        "status": "ok",
+                        "detail": (
+                            f"{len(workers)} isolated worker(s) alive ({', '.join(workers)}); "
+                            f"{pending} job(s) queued. No route to the database."
+                        ),
+                    }
+                )
+            else:
+                # Distinguished from "nothing to collect" on purpose (D-68): an
+                # idle pipeline and a dead fleet look identical from the
+                # database alone and need different responses.
+                checks.append(
+                    {
+                        "name": "fetch_zone",
+                        "status": "failed",
+                        "detail": (
+                            f"A queue is configured but no worker has reported. {pending} "
+                            "job(s) are waiting and nothing is collecting. Start the fetch "
+                            "zone: docker compose up -d fetcher."
+                        ),
+                    }
+                )
+        except Exception as exc:
+            checks.append({"name": "fetch_zone", "status": "failed", "detail": str(exc)})
 
     return _json({"checks": checks, "generated_at": datetime.now(UTC)})
 

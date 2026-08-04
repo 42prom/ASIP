@@ -1,0 +1,39 @@
+# The fetch zone image (D-11, D-75).
+#
+# A separate image from the core on purpose. §10.1 puts Playwright here
+# eventually, and its dependencies are heavy — but the reason it is separate
+# today has nothing to do with size. The fetch zone is a different trust
+# boundary, and an image that cannot install a database driver cannot
+# accidentally acquire one.
+#
+# Note what is absent: psycopg is a dependency of the `asip` package, so it
+# arrives in site-packages, but nothing this entrypoint imports reaches it and
+# the container has no route to postgres and no credential for it. The import
+# graph is asserted by tests/unit/collection/test_fetch_zone_isolation.py; the
+# route is a compose network; the credential is refused at startup. Three
+# independent mechanisms, because any single one can be defeated by someone
+# determined and all three failing at once takes a deliberate act.
+
+FROM python:3.12-slim
+
+# Non-root. If the fleet is compromised, the blast radius should not include
+# the container's own filesystem.
+RUN useradd --create-home --uid 10001 fetcher
+
+WORKDIR /app
+
+COPY pyproject.toml README.md ./
+COPY src ./src
+
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir .
+
+USER fetcher
+
+# No ASIP_DB_URL, no POSTGRES_*. The worker refuses to start if it finds one.
+ENV ASIP_FETCH_QUEUE_URL=redis://redis:6379/0 \
+    ASIP_OBJECT_STORE_URL=http://minio:9000 \
+    ASIP_FETCH_BUCKET=asip-captures \
+    PYTHONUNBUFFERED=1
+
+ENTRYPOINT ["python", "-m", "asip.entrypoints.fetch_worker"]

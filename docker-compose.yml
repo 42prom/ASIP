@@ -42,7 +42,9 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
-    networks: [core]
+    # On both networks on purpose: the queue is the boundary, so it is the one
+    # thing both zones must reach. Postgres is not on `fetch`, and never is.
+    networks: [core, fetch]
 
   minio:
     image: minio/minio:latest
@@ -60,7 +62,9 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
-    networks: [core]
+    # Also on both: the fetch zone writes captured bytes here, which is the
+    # only thing it is allowed to produce.
+    networks: [core, fetch]
 
   # Temporal shares the Postgres instance rather than running its own. It
   # creates its own databases (temporal, temporal_visibility) there, which is
@@ -86,6 +90,43 @@ services:
       retries: 12
     networks: [core]
 
+  # ═══════════════════════════════════════════════════════════════════════
+  # THE FETCH ZONE (D-11, V-3)
+  #
+  # Note what this service is NOT on: the `core` network. It cannot reach
+  # postgres because there is no route, not because it promises not to try.
+  # It is given the queue and the object store and nothing else — no
+  # ASIP_DB_URL, no POSTGRES_PASSWORD — and the worker refuses to start if it
+  # finds one, because the likeliest way this breaks is a well-meaning edit to
+  # a shared env file.
+  #
+  # If the fetch fleet is compromised, the attacker gets a browser pool and a
+  # bucket they can write to. Not the evidence, and not the tenants.
+  # ═══════════════════════════════════════════════════════════════════════
+  fetcher:
+    build:
+      context: .
+      dockerfile: Dockerfile.fetcher
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      ASIP_FETCH_QUEUE_URL: redis://redis:6379/0
+      ASIP_OBJECT_STORE_URL: http://minio:9000
+      ASIP_OBJECT_STORE_KEY: ${MINIO_ROOT_USER:-asip}
+      ASIP_OBJECT_STORE_SECRET: ${MINIO_ROOT_PASSWORD:-asip_dev_only}
+      ASIP_FETCH_BUCKET: asip-captures
+    # The fetch zone runs elsewhere, so "localhost" is its own loopback and not
+    # the developer's. This gives it a name for the host so the canary served
+    # by a locally-run API is reachable — the same problem any real source
+    # behind a corporate egress presents, surfaced early rather than at deploy.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [fetch]
+    restart: unless-stopped
+
 volumes:
   pgdata:
   miniodata:
@@ -94,18 +135,9 @@ networks:
   core:
     driver: bridge
 
-  # ═══════════════════════════════════════════════════════════════════════
-  # V-3 / D-11 — read before adding the fetcher.
-  #
-  # The Fetch Fleet holds no database credentials and cannot reach the core
-  # database. It pulls jobs from a queue and writes bundles to object storage,
-  # and nothing else. If the fleet is compromised, the data is not.
-  #
-  # That means the fetcher service does NOT join `core`. It joins a separate
-  # network with access to the queue and the object store only, and it never
-  # receives POSTGRES_* or ASIP_DB_URL in its environment. This is a veto, not
-  # a preference — it cannot be relaxed to make an integration test pass.
-  #
-  # fetch:
-  #   driver: bridge
-  # ═══════════════════════════════════════════════════════════════════════
+  # V-3 / D-11. The fetch zone's network. Postgres is deliberately absent from
+  # it, so the isolation is a routing fact rather than a convention. Adding
+  # postgres here to make something work would be a veto violation, not a
+  # configuration change.
+  fetch:
+    driver: bridge

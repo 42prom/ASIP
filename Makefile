@@ -26,7 +26,7 @@ LINT_IMPORTS := $(BIN)/lint-imports$(EXE)
 
 .PHONY: help install \
         lint layers test test-contracts test-independence test-isolation check \
-        migrate migrate-status seed-dev run pipeline test-fixtures validate-stix \
+        migrate migrate-status seed-dev run run-fetcher pipeline test-fixtures validate-stix \
         verify-chain check-schemas evidence-roundtrip chain-verify-full \
         test-integration \
         shadow-run measure-precision spike0-fetch spike0-report corpus eval
@@ -98,6 +98,13 @@ seed-dev:
 #   make run          then open http://127.0.0.1:8000 and press "Run pipeline"
 run:
 	$(PY) -m uvicorn asip.entrypoints.api:app --host 127.0.0.1 --port 8000 --reload
+
+# The fetch zone, run locally. Useful for debugging the worker itself; it does
+# NOT give you the isolation D-11 describes, because a local process shares the
+# host's network and can reach postgres. `docker compose up -d fetcher` is the
+# arrangement that actually enforces V-3.
+run-fetcher:
+	$(PY) -m asip.entrypoints.fetch_worker
 
 # One pass of the pipeline from the command line, for when the console is not
 # the point. Same code path the console's button calls.

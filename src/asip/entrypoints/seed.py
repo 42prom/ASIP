@@ -41,6 +41,19 @@ def seed(dsn: str, canary_url: str) -> None:
     print(f"seeded tenant {DEV_TENANT} with canary source at {canary_url}")
 
 
+def _default_canary_url() -> str:
+    """The canary URL as the *fetcher* will resolve it, not as the developer does.
+
+    With an isolated fetch zone the fetcher is in another container, where
+    127.0.0.1 is its own loopback. Seeding the developer's URL there produces a
+    connection refused that looks like a broken canary and is really a routing
+    mistake — so the default follows whichever zone will actually do the work.
+    """
+    if os.environ.get("ASIP_FETCH_QUEUE_URL"):
+        return "http://host.docker.internal:8000/canary/"
+    return "http://127.0.0.1:8000/canary/"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Seed the development tenant.")
     parser.add_argument(
@@ -51,8 +64,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--canary-url",
-        default=os.environ.get("ASIP_CANARY_URL", "http://127.0.0.1:8000/canary/"),
-        help="the canary page this instance serves",
+        default=os.environ.get("ASIP_CANARY_URL", _default_canary_url()),
+        help="the canary page this instance serves, as the FETCHER will see it",
     )
     args = parser.parse_args(argv)
     try:
