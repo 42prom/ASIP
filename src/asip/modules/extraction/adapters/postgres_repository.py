@@ -76,20 +76,26 @@ class PostgresExtractionRepository:
         fact of re-observation with it — leaving every item bound forever to the
         first capture that produced it (D-24, and it broke reprocessing).
 
-        Now a repeat updates last_seen and last_capture_id and nothing else.
-        `capture_id` stays put: it records where the item was FIRST seen, which
-        is the provenance claim, and rewriting it would destroy the record of
-        the original observation.
+        Now a repeat updates last_seen, last_capture_id and last_trace_id, and
+        nothing else. `capture_id` and `trace_id` stay put: they record where
+        and by which run the item was FIRST seen, which is the provenance claim,
+        and rewriting them would destroy the record of the original observation.
+
+        The `last_` columns exist because those are different facts from the
+        provenance ones, and the version that tried to hold both in one column
+        silently lost whichever was written second (D-24, D-13, D-112).
         """
         with self._conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO sch_extraction.content "
                 "(content_id, tenant_id, capture_id, source_id, account_id, trace_id, "
                 " posted_at_authoritative, posted_at_raw, timestamp_precision, text, "
-                " text_sha256, lang, extractor_version, script, last_capture_id) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                " text_sha256, lang, extractor_version, script, last_capture_id, "
+                " last_trace_id) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (content_id, posted_at_authoritative) DO UPDATE SET "
-                "  last_seen = now(), last_capture_id = EXCLUDED.last_capture_id",
+                "  last_seen = now(), last_capture_id = EXCLUDED.last_capture_id, "
+                "  last_trace_id = EXCLUDED.last_trace_id",
                 (
                     content_id,
                     tenant_id,
@@ -105,9 +111,10 @@ class PostgresExtractionRepository:
                     lang,
                     extractor_version,
                     script,
-                    # last_capture_id starts equal to capture_id and diverges
-                    # from it on every re-observation.
+                    # Both `last_` columns start equal to their provenance
+                    # counterpart and diverge on every re-observation.
                     capture_id,
+                    trace_id,
                 ),
             )
 

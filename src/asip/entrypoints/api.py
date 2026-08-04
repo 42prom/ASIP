@@ -36,6 +36,7 @@ from asip.entrypoints.composition import (
 )
 from asip.entrypoints.exporting import assemble
 from asip.entrypoints.pipeline import BURST_RULE_NAME, Pipeline
+from asip.entrypoints.provenance import trace_finding
 from asip.modules.collection.adapters.http_fetcher import HttpFetcher
 from asip.modules.collection.adapters.postgres_repository import PostgresCollectionRepository
 from asip.modules.detection.adapters.postgres_repository import PostgresDetectionRepository
@@ -427,6 +428,25 @@ def finding_detail(finding_id: UUID) -> JSONResponse:
             DEFAULT_TENANT, finding_id
         )
     return _json(finding)
+
+
+@app.get("/api/findings/{finding_id}/trace")
+def finding_trace(finding_id: UUID) -> JSONResponse:
+    """D-112 — which bytes this finding came from, in one query.
+
+    The question gets asked when a finding is disputed, so the answer has to be
+    one statement: four round trips can disagree with each other if anything
+    changes between them, and an answer that can disagree with itself is not
+    evidence.
+    """
+    with session() as conn:
+        trace = trace_finding(conn, DEFAULT_TENANT, finding_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail="no such finding")
+    # A finding whose evidence has vanished is not a 404 — it exists, and its
+    # existence is the problem. Reported as a V-5 integrity failure so it lands
+    # in front of someone instead of looking like a mistyped identifier.
+    return _json(trace)
 
 
 @app.post("/api/findings/{finding_id}/verdict")

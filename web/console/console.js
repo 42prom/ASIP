@@ -367,6 +367,35 @@ async function findingDetail(root, id) {
     el("li", {}, el("button", { class: "link", onclick: () => go("evidence", { id: ref }) },
       el("span", { class: "hash" }, ref))))));
 
+  // D-112 — the question asked when a finding is disputed: which bytes is this
+  // built on? One query, so the answer cannot disagree with itself.
+  root.append(el("h2", {}, "Provenance"));
+  const trace = await api(`/api/findings/${id}/trace`).catch(() => null);
+  if (!trace) {
+    root.append(el("p", { class: "screen-note held" }, "No trace available."));
+  } else if (!trace.traceable) {
+    root.append(el("p", { class: "screen-note held" }, trace.summary));
+  } else {
+    root.append(el("p", { class: "screen-note ok" }, trace.summary));
+    root.append(el("dl", { class: "detail-grid" },
+      dt("Capture"), dd(trace.capture_id, "hash"),
+      dt("Captured"), dd(ts(trace.captured_at), "timestamp"),
+      dt("Bundle"), dd(trace.bundle_id, "hash"),
+      dt("Manifest"), dd(trace.manifest_sha256, "hash"),
+      dt("Chain index"), dd(trace.chain_index),
+      dt("Timestamped"), dd(trace.has_timestamp ? "yes — RFC 3161 token stored" : "not yet"),
+      dt("Trace continuous"), dd(trace.trace_is_continuous
+        ? `yes — ${trace.finding_trace_id} from fetch to finding`
+        : `no — finding ${trace.finding_trace_id}, capture ${trace.bundle_trace_id}`),
+      dt("Items still pointing here"), dd(
+        `${trace.items_still_pointing_here} (first extracted from this capture: ${trace.items_from_this_capture})`)));
+    root.append(el("p", { class: "screen-note" },
+      "\"Items still pointing here\" falls to zero once the same items are seen " +
+      "again in a later capture — the content moves forward while this finding " +
+      "keeps pointing at the bytes it was actually built on. That is the intent: " +
+      "the evidence a finding rests on does not change when the page does."));
+  }
+
   root.append(el("h2", {}, "Verdict"));
   root.append(el("p", { class: "screen-note" },
     "Recording likely or confirmed coordination is what exports this finding as STIX. " +
