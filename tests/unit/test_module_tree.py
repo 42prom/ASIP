@@ -80,8 +80,32 @@ def test_skeleton_package_imports(package: str) -> None:
     importlib.import_module(package)
 
 
-def test_composition_root_is_the_only_documented_adapter_importer() -> None:
-    """D-98. It raises until Phase 1 wires the first adapters."""
+def test_composition_root_takes_its_dependencies_rather_than_opening_them() -> None:
+    """D-98, and the transaction boundary.
+
+    The container is built from settings and an existing connection. An
+    adapter graph that opened its own connection could not take part in the
+    caller's transaction, and the evidence chain depends on exactly that.
+    """
+    import inspect
+
     composition = importlib.import_module("asip.entrypoints.composition")
-    with pytest.raises(NotImplementedError, match="Phase 1"):
-        composition.build_container()
+    signature = inspect.signature(composition.build_container)
+
+    assert list(signature.parameters) == ["settings", "connection"]
+
+
+def test_settings_are_populated_from_the_environment() -> None:
+    """Names live in the repository; values come from the environment.
+
+    Asserted by behaviour: constructing Settings with nothing set must fail
+    rather than fall back to a default that would silently point development
+    tooling somewhere real (P-01).
+    """
+    composition = importlib.import_module("asip.entrypoints.composition")
+
+    with pytest.MonkeyPatch.context() as patch:
+        for name in ("ASIP_DB_URL", "ASIP_OBJECT_STORE_URL", "ASIP_TSA_URL"):
+            patch.delenv(name, raising=False)
+        with pytest.raises(KeyError):
+            composition.Settings.from_env()

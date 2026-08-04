@@ -75,6 +75,14 @@ warn_unused_ignores = true
 disallow_untyped_defs = true
 no_implicit_optional = true
 
+# Third-party libraries that ship no type information. Listed by name rather
+# than relaxed globally: each one is reachable only from an L3 adapter, and an
+# untyped import appearing anywhere else should still be an error. Nothing here
+# affects L1 — the domain layer imports none of them, by contract.
+[[tool.mypy.overrides]]
+module = ["warcio.*", "boto3.*", "botocore.*", "rfc3161ng.*"]
+ignore_missing_imports = true
+
 # L1 domain is the layer that must never be loosened. It has no I/O, so there
 # is no third-party stub gap to excuse an Any. Strictest settings apply here
 # and are expected to stay applied.

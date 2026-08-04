@@ -28,6 +28,7 @@ LINT_IMPORTS := $(BIN)/lint-imports$(EXE)
         lint layers test test-contracts test-independence test-isolation check \
         migrate migrate-status seed-dev test-fixtures validate-stix \
         verify-chain check-schemas evidence-roundtrip chain-verify-full \
+        test-integration \
         shadow-run measure-precision spike0-fetch spike0-report corpus eval
 
 help:
@@ -134,11 +135,20 @@ verify-chain:
 	@echo   Lands in Phase 1. A broken chain is a P1 incident (D-90). >&2
 	@exit 1
 
+# D-88.2. Write a bundle, verify its manifest and chain, and read it back with
+# an independent WARC reader — against real PostgreSQL and a real object store.
+# The TSA leg runs offline: what is asserted is the unreachable-authority path
+# (pending, never verified), which is the case that actually occurs. Verifying
+# a live token is a separate, network-dependent check.
 evidence-roundtrip:
-	@echo NOT IMPLEMENTED: evidence-roundtrip — no evidence module. >&2
-	@echo   Write bundle, verify manifest, verify chain, verify TSA, read back with >&2
-	@echo   an independent WARC reader (D-88.2). Lands in Phase 1. >&2
+ifndef ASIP_TEST_DB_URL
+	@echo NOT RUN: evidence-roundtrip needs ASIP_TEST_DB_URL and ASIP_TEST_S3_URL. >&2
+	@echo   docker compose up -d postgres minio >&2
+	@echo   make evidence-roundtrip ASIP_TEST_DB_URL=postgresql://... ASIP_TEST_S3_URL=http://127.0.0.1:9000 >&2
 	@exit 1
+else
+	$(PYTEST) tests/integration
+endif
 
 chain-verify-full:
 	@echo NOT IMPLEMENTED: chain-verify-full — no chain history exists. >&2

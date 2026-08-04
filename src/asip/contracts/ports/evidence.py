@@ -10,6 +10,7 @@ the published interface and the plan cannot drift apart silently.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Protocol
 from uuid import UUID
 
@@ -18,6 +19,7 @@ from asip.contracts.evidence import (
     BundleRecord,
     BundleRef,
     ChainEntry,
+    Manifest,
     StoredBundle,
     TimestampRecord,
     VerificationResult,
@@ -36,12 +38,38 @@ class ObjectStore(Protocol):
     def list_prefix(self, prefix: str) -> tuple[str, ...]:
         """Every key under a prefix.
 
-        Required by invariant 1: verification has to discover what is *actually*
-        stored, not just re-hash what the manifest already admits to. Walking
-        only the manifest's own list cannot detect a planted file, which is
-        precisely the thing an unlisted file would be.
+        Used by retention (D-54), which has to find every object belonging to
+        an expired bundle. Verification does not use this: a bundle is one WARC
+        object, so discovering what is actually inside it means enumerating the
+        archive's records, not the store's keys.
         """
         ...
+
+
+class BundleArchive(Protocol):
+    """A bundle serialised as a single WARC object (D-20).
+
+    A bundle is a WARC file, not a directory of loose blobs. That is the point
+    of D-20: the archiving standard means a journalist's forensics tool, or the
+    Internet Archive's, opens the evidence without ever having seen this code.
+    A custom layout would make the evidence readable only by the software that
+    produced it, which defeats the purpose of preserving it.
+
+    ``read`` returns only the artifact records, so a record planted inside the
+    archive appears here and is caught by the manifest check. The manifest and
+    capture metadata travel as distinct WARC record types precisely so they are
+    not mistaken for artifacts.
+    """
+
+    def write(
+        self,
+        key: str,
+        manifest: Manifest,
+        artifacts: Mapping[str, bytes],
+        metadata: Mapping[str, object],
+    ) -> None: ...
+
+    def read(self, key: str) -> dict[str, bytes]: ...
 
 
 class TimestampAuthority(Protocol):

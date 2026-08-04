@@ -27,11 +27,12 @@ from asip.contracts.evidence import (
     VerificationOutcome,
     VerificationResult,
 )
-from asip.contracts.ports.evidence import EvidenceRepository, ObjectStore, TimestampAuthority
+from asip.contracts.ports.evidence import BundleArchive, EvidenceRepository, TimestampAuthority
 
 from ..domain.chain import verify_chain
 from ..domain.hashing import sha256_hex
 from ..domain.manifest import manifest_digest, verify_manifest
+from .write_bundle import ARCHIVE_OBJECT_NAME
 
 
 class VerifyBundle:
@@ -39,11 +40,11 @@ class VerifyBundle:
 
     def __init__(
         self,
-        object_store: ObjectStore,
+        archive: BundleArchive,
         repository: EvidenceRepository,
         timestamp_authority: TimestampAuthority,
     ) -> None:
-        self._objects = object_store
+        self._archive = archive
         self._repository = repository
         self._tsa = timestamp_authority
 
@@ -86,15 +87,17 @@ class VerifyBundle:
                 f"(stored {record.manifest_sha256}, recomputed {recomputed})"
             )
 
-        # Discover what is actually stored rather than re-hashing only what the
-        # manifest admits to. Listing the prefix is what lets verify_manifest
-        # report a planted file; walking the manifest's own entries never can.
-        prefix = f"{record.object_prefix}/"
-        observed: dict[str, str] = {}
-        for key in self._objects.list_prefix(prefix):
-            name = key[len(prefix) :]
-            observed[name] = sha256_hex(self._objects.get(key))
+        # Read what the archive actually contains rather than re-hashing only
+        # what the manifest admits to. Enumerating the WARC's own records is
+        # what lets verify_manifest report a planted one; walking the manifest's
+        # entries never can.
+        try:
+            stored_artifacts = self._archive.read(f"{record.object_prefix}/{ARCHIVE_OBJECT_NAME}")
+        except Exception as exc:
+            problems.append(f"bundle archive could not be read: {exc}")
+            return problems
 
+        observed = {name: sha256_hex(data) for name, data in stored_artifacts.items()}
         problems.extend(verify_manifest(record.manifest, observed))
         return problems
 

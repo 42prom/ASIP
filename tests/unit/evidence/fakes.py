@@ -8,6 +8,7 @@ the property they exist to protect is broken.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID
@@ -15,6 +16,7 @@ from uuid import UUID
 from asip.contracts.evidence import (
     BundleRecord,
     ChainEntry,
+    Manifest,
     StoredBundle,
     TimestampRecord,
 )
@@ -48,6 +50,49 @@ class FakeObjectStore:
     def corrupt(self, key: str, data: bytes) -> None:
         """Simulate tampering after the fact."""
         self.blobs[key] = data
+
+
+class FakeArchive:
+    """A bundle archive that keeps artifacts in memory.
+
+    Stands in for the WARC adapter so L2 tests stay fast and format-agnostic.
+    The real container is exercised separately in the round-trip suite, against
+    an independent reader — that is where D-20 is actually tested.
+    """
+
+    def __init__(self) -> None:
+        self.archives: dict[str, dict[str, bytes]] = {}
+        self.manifests: dict[str, Manifest] = {}
+        self.metadata: dict[str, Mapping[str, object]] = {}
+        self.write_calls: list[str] = []
+        self.fail_write = False
+
+    def write(
+        self,
+        key: str,
+        manifest: Manifest,
+        artifacts: Mapping[str, bytes],
+        metadata: Mapping[str, object],
+    ) -> None:
+        if self.fail_write:
+            raise OSError(f"object store unavailable for {key}")
+        self.archives[key] = dict(artifacts)
+        self.manifests[key] = manifest
+        self.metadata[key] = dict(metadata)
+        self.write_calls.append(key)
+
+    def read(self, key: str) -> dict[str, bytes]:
+        if key not in self.archives:
+            raise KeyError(f"no archive at {key}")
+        return dict(self.archives[key])
+
+    def corrupt(self, key: str, name: str, data: bytes) -> None:
+        """Simulate tampering inside a sealed archive."""
+        self.archives[key][name] = data
+
+    def plant(self, key: str, name: str, data: bytes) -> None:
+        """Add a record the manifest does not list."""
+        self.archives[key][name] = data
 
 
 @dataclass

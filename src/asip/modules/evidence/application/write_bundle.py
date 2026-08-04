@@ -36,6 +36,7 @@ and this docstring changes.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import asdict
 
 from asip.contracts.evidence import (
     BundleDraft,
@@ -46,13 +47,14 @@ from asip.contracts.evidence import (
     TsaStatus,
 )
 from asip.contracts.ports.clock import Clock
-from asip.contracts.ports.evidence import EvidenceRepository, ObjectStore, TimestampAuthority
+from asip.contracts.ports.evidence import BundleArchive, EvidenceRepository, TimestampAuthority
 
 from ..domain.chain import link
 from ..domain.hashing import sha256_hex
 from ..domain.manifest import build_manifest, manifest_digest
 
-MANIFEST_OBJECT_NAME = "manifest.json"
+#: A bundle is one WARC object, not a directory of blobs (D-20).
+ARCHIVE_OBJECT_NAME = "bundle.warc.gz"
 
 
 class BundleIntegrityError(ValueError):
@@ -64,13 +66,13 @@ class WriteBundle:
 
     def __init__(
         self,
-        object_store: ObjectStore,
+        archive: BundleArchive,
         repository: EvidenceRepository,
         timestamp_authority: TimestampAuthority,
         clock: Clock,
         authority_url: str,
     ) -> None:
-        self._objects = object_store
+        self._archive = archive
         self._repository = repository
         self._tsa = timestamp_authority
         self._clock = clock
@@ -83,13 +85,24 @@ class WriteBundle:
         digest = manifest_digest(manifest)
         prefix = f"{draft.tenant_id}/{draft.bundle_id}"
 
-        # Step 1 — blobs first. Idempotent; an orphan here is harmless.
-        for artifact in manifest.artifacts:
-            self._objects.put(
-                f"{prefix}/{artifact.name}",
-                artifacts[artifact.name],
-                artifact.media_type,
-            )
+        # Step 1 — the WARC first. Idempotent; an orphan here is harmless.
+        self._archive.write(
+            f"{prefix}/{ARCHIVE_OBJECT_NAME}",
+            manifest,
+            artifacts,
+            {
+                "bundle_id": str(draft.bundle_id),
+                "capture_id": str(draft.capture_id),
+                "tenant_id": str(draft.tenant_id),
+                "trace_id": draft.trace_id,
+                "source_url": draft.source_url,
+                "captured_at": draft.captured_at.isoformat(),
+                # asdict, not vars: RenderParams uses slots and has no __dict__.
+                "render_params": (
+                    None if draft.render_params is None else asdict(draft.render_params)
+                ),
+            },
+        )
 
         # Step 2 — the atomic pair.
         entry = self._next_chain_entry(draft, digest)
