@@ -15,7 +15,6 @@ that runs invisibly is a stage nobody can debug.
 from __future__ import annotations
 
 import hashlib
-import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -25,6 +24,7 @@ from uuid import UUID
 import psycopg
 
 from asip.contracts.evidence import Artifact, ArtifactKind, BundleDraft, RenderParams
+from asip.entrypoints.exporting import assemble
 from asip.modules.collection.adapters.http_fetcher import HttpFetcher
 from asip.modules.collection.adapters.postgres_repository import PostgresCollectionRepository
 from asip.modules.detection.adapters.postgres_repository import PostgresDetectionRepository
@@ -35,13 +35,14 @@ from asip.modules.detection.domain.burst import (
 )
 from asip.modules.evidence.application.write_bundle import WriteBundle
 from asip.modules.export.adapters.postgres_repository import PostgresExportRepository
-from asip.modules.export.domain.stix import FindingExport, build_bundle
+from asip.modules.export.application.export_finding import ExportFinding
 from asip.modules.extraction.adapters.postgres_repository import (
     PostgresExtractionRepository,
     account_id_for,
     content_id_for,
 )
 from asip.modules.extraction.domain.parser import parse_capture
+from asip.modules.review.adapters.postgres_repository import PostgresReviewRepository
 
 #: The one rule the skeleton runs. Fixed id so re-running does not multiply it.
 BURST_RULE_ID = UUID("d17ec7a0-0000-4000-8000-a51900000003")
@@ -119,6 +120,7 @@ class Pipeline:
         self._extraction = PostgresExtractionRepository(connection)
         self._detection = PostgresDetectionRepository(connection)
         self._export = PostgresExportRepository(connection)
+        self._review = PostgresReviewRepository(connection)
 
     def run(self) -> PipelineRun:
         """One pass. Every stage reports, including when it does nothing."""
@@ -334,41 +336,46 @@ class Pipeline:
         )
 
         # ── export ──────────────────────────────────────────────────────────
-        exported = 0
+        #
+        # This stage used to write a bundle for every finding it had just made.
+        # That was wrong, and wrong in the direction that cannot be undone.
+        #
+        # M-06 crosses the Tier 1/Tier 2 boundary only at LIKELY_COORDINATION or
+        # above. A finding this run produced has no verdict yet — nobody has
+        # looked at it — so every one of them is refused here. Exporting them
+        # anyway would push unreviewed observations from a rule with no measured
+        # precision into recipients' threat intelligence, where they are indexed,
+        # forwarded, and impossible to retract.
+        #
+        # The refusal path runs rather than being skipped, so the boundary is
+        # exercised in production and not only in tests.
+        exporter = ExportFinding(self._export)
+        outcomes = []
         for finding_id in finding_ids:
             finding = self._detection.get_finding(self._tenant, finding_id)
             if finding is None:
                 continue
-            bundle = build_bundle(
-                FindingExport(
-                    finding_id=finding_id,
-                    tenant_id=self._tenant,
-                    rule_name=finding["rule_name"],
-                    source_url=source["url"],
-                    window_start=finding["window_start"],
-                    window_end=finding["window_end"],
-                    item_count=finding["item_count"],
-                    account_count=finding["account_count"],
-                    signals=finding["signals"],
-                    evidence_refs=[UUID(str(r)) for r in finding["evidence_refs"]],
-                    manifest_digests=[ref.manifest_sha256],
-                    shadow=finding["shadow"],
-                    detected_at=finding["detected_at"],
-                )
-            )
-            payload = json.dumps(bundle, sort_keys=True, separators=(",", ":"))
-            self._export.record_export(
-                uuid.uuid4(),
+            verdict = self._review.current_verdicts(self._tenant).get(str(finding_id))
+            export = assemble(
+                self._conn,
                 self._tenant,
-                finding_id,
-                trace_id,
-                payload,
-                hashlib.sha256(payload.encode()).hexdigest(),
-                len(bundle["objects"]),
+                finding,
+                verdict["verdict"] if verdict else None,
             )
-            exported += 1
+            outcomes.append(exporter.execute(export, trace_id))
         self._conn.commit()
-        run.record("export", "ok", f"{exported} STIX 2.1 bundle(s) written.", exports=exported)
+
+        exported = sum(1 for o in outcomes if o.exported)
+        held = len(outcomes) - exported
+        run.record(
+            "export",
+            "ok",
+            f"{exported} STIX 2.1 bundle(s) written; {held} finding(s) held in Tier 1. "
+            "M-06: a finding leaves this system only after an analyst records "
+            "likely_coordination or above. Review one to export it.",
+            exports=exported,
+            held_for_review=held,
+        )
 
     def _record_capture(
         self,

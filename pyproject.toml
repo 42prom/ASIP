@@ -93,7 +93,13 @@ no_implicit_optional = true
 # untyped import appearing anywhere else should still be an error. Nothing here
 # affects L1 — the domain layer imports none of them, by contract.
 [[tool.mypy.overrides]]
-module = ["warcio.*", "boto3.*", "botocore.*", "rfc3161ng.*", "pyasn1.*", "redis.*"]
+module = [
+    "warcio.*", "boto3.*", "botocore.*", "rfc3161ng.*", "pyasn1.*", "redis.*",
+    # The OASIS reference implementation. Test-only: it validates our export
+    # rather than being imported by it, so the missing py.typed marker costs
+    # nothing in src/.
+    "stix2.*",
+]
 ignore_missing_imports = true
 
 # L1 domain is the layer that must never be loosened. It has no I/O, so there

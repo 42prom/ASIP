@@ -34,6 +34,7 @@ from asip.entrypoints.composition import (
     _read_optional,
     build_evidence,
 )
+from asip.entrypoints.exporting import assemble
 from asip.entrypoints.pipeline import BURST_RULE_NAME, Pipeline
 from asip.modules.collection.adapters.http_fetcher import HttpFetcher
 from asip.modules.collection.adapters.postgres_repository import PostgresCollectionRepository
@@ -41,6 +42,7 @@ from asip.modules.detection.adapters.postgres_repository import PostgresDetectio
 from asip.modules.evidence.adapters.postgres_repository import PostgresEvidenceRepository
 from asip.modules.evidence.adapters.rfc3161_tsa import FREETSA_URL
 from asip.modules.export.adapters.postgres_repository import PostgresExportRepository
+from asip.modules.export.application.export_finding import ExportFinding, crosses_the_boundary
 from asip.modules.extraction.adapters.postgres_repository import PostgresExtractionRepository
 from asip.modules.review.adapters.postgres_repository import VERDICTS, PostgresReviewRepository
 
@@ -429,9 +431,17 @@ def finding_detail(finding_id: UUID) -> JSONResponse:
 
 @app.post("/api/findings/{finding_id}/verdict")
 def record_verdict(finding_id: UUID, payload: dict[str, str]) -> JSONResponse:
+    """Record a verdict, and export if it crosses the M-06 boundary.
+
+    This is the only place a finding becomes a STIX bundle. Export is a
+    consequence of an analyst's decision, never of a rule firing — a rule with
+    no measured precision (V-4) produces observations, and an observation
+    handed to a recipient as though it were an assessment cannot be recalled.
+    """
     verdict = payload.get("verdict", "")
     if verdict not in VERDICTS:
         raise HTTPException(status_code=400, detail=f"verdict must be one of {VERDICTS}")
+
     with session() as conn:
         PostgresReviewRepository(conn).record_verdict(
             uuid.uuid4(),
@@ -442,7 +452,32 @@ def record_verdict(finding_id: UUID, payload: dict[str, str]) -> JSONResponse:
             payload.get("rationale", ""),
             BURST_RULE_NAME,
         )
-    return _json({"ok": True, "finding_id": finding_id, "verdict": verdict})
+
+        response: dict[str, Any] = {"ok": True, "finding_id": finding_id, "verdict": verdict}
+
+        if not crosses_the_boundary(verdict):
+            response["exported"] = False
+            response["reason"] = (
+                f"{verdict} stays in Tier 1. M-06 exports at likely_coordination or above."
+            )
+            return _json(response)
+
+        finding = PostgresDetectionRepository(conn).get_finding(DEFAULT_TENANT, finding_id)
+        if finding is None:
+            raise HTTPException(status_code=404, detail="no such finding")
+
+        outcome = ExportFinding(PostgresExportRepository(conn)).execute(
+            assemble(conn, DEFAULT_TENANT, finding, verdict),
+            str(finding.get("trace_id") or ""),
+        )
+
+    response["exported"] = outcome.exported
+    response["reason"] = outcome.reason
+    if outcome.exported:
+        response["export_id"] = outcome.export_id
+        response["bundle_sha256"] = outcome.bundle_sha256
+        response["object_count"] = outcome.object_count
+    return _json(response)
 
 
 @app.get("/api/rules")
@@ -506,9 +541,11 @@ def graph() -> JSONResponse:
     """
     with session() as conn, conn.cursor() as cur:
         cur.execute(
+            # Through the published view, not the table (D-92, D-99).
             "SELECT fa.finding_id, fa.account_id, a.handle "
             "  FROM sch_detection.finding_accounts fa "
-            "  JOIN sch_extraction.accounts a ON a.account_id = fa.account_id "
+            "  JOIN sch_extraction.v_accounts_for_export a "
+            "    ON a.account_id = fa.account_id AND a.tenant_id = fa.tenant_id "
             " WHERE fa.tenant_id = %s",
             (DEFAULT_TENANT,),
         )

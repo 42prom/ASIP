@@ -141,6 +141,15 @@ h1 {
   color: var(--slate); font-size: var(--text-sm); margin: 0 0 var(--space-6);
   max-width: 78ch; line-height: 1.55;
 }
+/* The outcome of an action the analyst just took. `held` is deliberately not
+   red: a finding kept inside Tier 1 is the system working, not an error. */
+.screen-note.ok, .screen-note.held {
+  border-left: 2px solid var(--archive); padding-left: var(--space-3);
+  margin-top: var(--space-3); font-family: var(--font-data);
+  font-size: var(--text-xs);
+}
+.screen-note.ok   { border-left-color: var(--verified); color: var(--verified); }
+.screen-note.held { border-left-color: var(--status-stale); color: var(--status-stale); }
 h2 {
   font-size: var(--text-sm); margin: var(--space-6) 0 var(--space-2);
   font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;

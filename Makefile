@@ -62,10 +62,10 @@ test-independence:              ## D-99 remove each module in turn, assert other
 # `check` is what you run before declaring done (CLAUDE.md §5). It grows as
 # the stubs below are implemented; it deliberately does not invoke them now,
 # because a target that always fails trains everyone to ignore the gate.
-check: lint layers test
-	@echo PASSED - lint, layers, test. test-contracts and test-independence run inside test.
+check: lint layers test validate-stix
+	@echo PASSED - lint, layers, test, validate-stix. contracts and independence run inside test.
 	@echo NOT RUN HERE - test-isolation needs a database: make test-isolation ASIP_TEST_DB_URL=...
-	@echo NOT YET WIRED - test-fixtures, validate-stix, verify-chain, check-schemas.
+	@echo NOT YET WIRED - test-fixtures, verify-chain, check-schemas.
 	@echo These are required by CLAUDE.md section 5 and land with the code they gate.
 
 # ─── Environment — Phase 1 ──────────────────────────────────────────────────
@@ -147,10 +147,12 @@ else
 	$(PYTEST) tests/isolation
 endif
 
+# Every exported object is parsed by the OASIS reference implementation, and
+# the model directives (M-01, M-03, M-06, M-15, M-17, M-18) are asserted over
+# the serialised bundle. Needs no database: the bundle is a pure function of a
+# finding, which is the reason the exporter is L1.
 validate-stix:
-	@echo NOT IMPLEMENTED: validate-stix — nothing is exported yet. >&2
-	@echo   Lands in Phase 1 with the first grouping + sighting bundle (W-01). >&2
-	@exit 1
+	$(PYTEST) tests/unit/export
 
 check-schemas:
 	@echo NOT IMPLEMENTED: check-schemas — no schemas exist. >&2

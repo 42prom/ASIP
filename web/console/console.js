@@ -322,7 +322,12 @@ screens.findings = {
   },
 };
 
+//: The result of the last verdict posted, so the detail screen can report what
+//: the verdict did after it re-renders. Cleared when a different finding opens.
+let lastExport = null;
+
 async function findingDetail(root, id) {
+  if (lastExport && lastExport.finding_id !== id) lastExport = null;
   const f = await api(`/api/findings/${id}`);
   root.append(el("dl", { class: "detail-grid" },
     dt("Finding"), dd(f.finding_id, "hash"),
@@ -363,13 +368,33 @@ async function findingDetail(root, id) {
       el("span", { class: "hash" }, ref))))));
 
   root.append(el("h2", {}, "Verdict"));
+  root.append(el("p", { class: "screen-note" },
+    "Recording likely or confirmed coordination is what exports this finding as STIX. " +
+    "M-06: nothing leaves the system on a rule's say-so — a rule with no measured " +
+    "precision produces observations, and an observation sent to a recipient as an " +
+    "assessment cannot be recalled."));
+
+  // Survives the re-render below, which is the whole point: an analyst needs to
+  // see what their verdict did, and re-rendering the screen would otherwise
+  // discard the answer the moment it arrived.
+  if (lastExport && lastExport.finding_id === id) {
+    root.append(el("p", { class: lastExport.exported ? "screen-note ok" : "screen-note held" },
+      lastExport.exported
+        ? `Exported — ${lastExport.object_count} STIX objects, sha256 ${String(lastExport.bundle_sha256).slice(0, 16)}…`
+        : `Not exported — ${lastExport.reason}`));
+  }
+
   root.append(el("div", { class: "verdict-actions" },
     ["confirmed_coordination", "likely_coordination", "insufficient_evidence", "no_coordination"]
       .map((v) => el("button", { onclick: async () => {
-        await api(`/api/findings/${id}/verdict`, {
+        const res = await api(`/api/findings/${id}/verdict`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ verdict: v, analyst: "console" }),
         });
+        // What the verdict did, not only that it was recorded. "Held in Tier 1"
+        // is a result, not a failure — an analyst who is not told will conclude
+        // the export is broken and go looking for a bug that does not exist.
+        lastExport = { ...res, finding_id: id };
         go("findings", { id });
       } }, el("span", { class: `verdict verdict-${v}` }, v.replace(/_/g, " "))))));
 
