@@ -171,6 +171,28 @@ screens.captures = {
       return;
     }
     root.append(jobsTable(rows));
+
+    root.append(el("h2", {}, "Reprocessing (D-13)"));
+    root.append(el("p", { class: "screen-note" },
+      "A capture is fetched once and may be parsed many times. Bumping the extractor " +
+      "and re-running it over stored captures costs CPU and contacts no source — " +
+      "refetching instead is the error D-13 exists to prevent, and it costs real money."));
+
+    const backlog = await api("/api/reprocess/backlog");
+    root.append(el("p", { class: "screen-note" },
+      `Current extractor: v${backlog.current_extractor_version}. ` +
+      `${backlog.captures.length} capture(s) hold content from an older version.`));
+
+    root.append(el("div", { class: "verdict-actions" },
+      el("button", { onclick: async () => {
+        const status = document.getElementById("reprocess-status");
+        status.textContent = "reprocessing…";
+        try {
+          const r = await api("/api/reprocess", { method: "POST" });
+          status.textContent = r.summary;
+        } catch (error) { status.textContent = `failed: ${error.message}`; }
+      } }, "Reprocess stored captures"),
+      el("span", { id: "reprocess-status", class: "run-status" }, "")));
   },
 };
 
@@ -261,12 +283,15 @@ screens.content = {
         "Content appears after a capture is parsed."));
       return;
     }
-    root.append(table(["Posted (authoritative)", "Precision", "Account", "Text", "Extractor"],
+    root.append(table(
+      ["Posted (authoritative)", "Precision", "Account", "Text", "Script", "Last seen", "Extractor"],
       rows, (c) => el("tr", { "data-row": "1" },
         el("td", { class: "timestamp" }, ts(c.posted_at_authoritative)),
         el("td", { class: "hash" }, c.timestamp_precision),
         el("td", {}, c.handle),
         el("td", {}, c.text),
+        el("td", { class: "hash" }, c.script || "—"),
+        el("td", { class: "timestamp" }, ts(c.last_seen)),
         el("td", { class: "num" }, `v${c.extractor_version}`))));
   },
 };

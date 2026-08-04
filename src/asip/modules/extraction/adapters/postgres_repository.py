@@ -66,21 +66,30 @@ class PostgresExtractionRepository:
         text_sha256: str,
         lang: str | None,
         extractor_version: int,
+        script: str | None = None,
     ) -> None:
-        """Insert one item, ignoring a repeat.
+        """Insert one item, or record that an existing one was seen again.
 
-        ON CONFLICT DO NOTHING is what makes reprocessing safe: running a newer
-        extractor over the same capture re-derives the same content_id and the
-        row is left alone rather than duplicated (D-13).
+        The content_id is deterministic, so a page captured twice re-derives the
+        same id and must not duplicate. The first version of this used ON
+        CONFLICT DO NOTHING, which achieved that and silently threw away the
+        fact of re-observation with it — leaving every item bound forever to the
+        first capture that produced it (D-24, and it broke reprocessing).
+
+        Now a repeat updates last_seen and last_capture_id and nothing else.
+        `capture_id` stays put: it records where the item was FIRST seen, which
+        is the provenance claim, and rewriting it would destroy the record of
+        the original observation.
         """
         with self._conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO sch_extraction.content "
                 "(content_id, tenant_id, capture_id, source_id, account_id, trace_id, "
                 " posted_at_authoritative, posted_at_raw, timestamp_precision, text, "
-                " text_sha256, lang, extractor_version) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
-                "ON CONFLICT (content_id, posted_at_authoritative) DO NOTHING",
+                " text_sha256, lang, extractor_version, script, last_capture_id) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (content_id, posted_at_authoritative) DO UPDATE SET "
+                "  last_seen = now(), last_capture_id = EXCLUDED.last_capture_id",
                 (
                     content_id,
                     tenant_id,
@@ -95,6 +104,10 @@ class PostgresExtractionRepository:
                     text_sha256,
                     lang,
                     extractor_version,
+                    script,
+                    # last_capture_id starts equal to capture_id and diverges
+                    # from it on every re-observation.
+                    capture_id,
                 ),
             )
 
@@ -150,7 +163,9 @@ class PostgresExtractionRepository:
             cur.execute(
                 "SELECT c.content_id, c.capture_id, c.source_id, c.trace_id, "
                 "       c.posted_at_authoritative, c.posted_at_raw, c.timestamp_precision, "
-                "       c.text, c.text_sha256, c.extractor_version, a.handle, a.display_name "
+                "       c.text, c.text_sha256, c.extractor_version, c.script, "
+                "       c.first_seen, c.last_seen, c.last_capture_id, "
+                "       a.handle, a.display_name "
                 "  FROM sch_extraction.content c "
                 "  JOIN sch_extraction.accounts a ON a.account_id = c.account_id "
                 " WHERE c.tenant_id = %s AND c.deleted_at IS NULL "
@@ -159,6 +174,87 @@ class PostgresExtractionRepository:
             )
             columns = [d[0] for d in cur.description or ()]
             return [dict(zip(columns, row, strict=True)) for row in cur.fetchall()]
+
+    # ── reprocessing (D-13) ─────────────────────────────────────────────────
+
+    def reprocessing_backlog(self, tenant_id: UUID, current_version: int) -> list[dict[str, Any]]:
+        """Captures whose content predates the current extractor.
+
+        Read through the published view. Returns captures, not items: a capture
+        is re-parsed once and yields all of its items, so batching by capture is
+        what keeps a reprocess of a million rows from reading the same archive a
+        million times.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT capture_id, oldest_extractor_version, items "
+                "  FROM sch_extraction.v_reprocessing_backlog "
+                " WHERE tenant_id = %s AND oldest_extractor_version < %s "
+                " ORDER BY capture_id",
+                (tenant_id, current_version),
+            )
+            columns = [d[0] for d in cur.description or ()]
+            return [dict(zip(columns, row, strict=True)) for row in cur.fetchall()]
+
+    def content_for_capture(self, tenant_id: UUID, capture_id: UUID) -> list[dict[str, Any]]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT content_id, posted_at_authoritative, text_sha256, script, "
+                "       extractor_version "
+                "  FROM sch_extraction.content "
+                " WHERE tenant_id = %s AND last_capture_id = %s AND deleted_at IS NULL",
+                (tenant_id, capture_id),
+            )
+            columns = [d[0] for d in cur.description or ()]
+            return [dict(zip(columns, row, strict=True)) for row in cur.fetchall()]
+
+    @staticmethod
+    def content_id_for(platform: str, external_id: str) -> UUID:
+        """Exposed so the reprocess use case derives ids the same way."""
+        return content_id_for(platform, external_id)
+
+    def update_extracted(
+        self,
+        tenant_id: UUID,
+        content_id: UUID,
+        posted_at: datetime,
+        text: str,
+        text_sha256: str,
+        script: str | None,
+        precision: str,
+        extractor_version: int,
+    ) -> bool:
+        """Write a newer extractor's reading over an older one.
+
+        Returns whether anything actually changed. The version guard is what
+        makes a reprocess safe to run twice and safe to run out of order: an
+        older extractor can never overwrite a newer one's output, so a stale
+        worker rejoining after a deploy corrupts nothing.
+
+        Identity columns are untouched — which capture it came from and when it
+        was posted are not the extractor's to revise.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE sch_extraction.content "
+                "   SET text = %s, text_sha256 = %s, script = %s, "
+                "       timestamp_precision = %s, extractor_version = %s "
+                " WHERE tenant_id = %s AND content_id = %s "
+                "   AND posted_at_authoritative = %s "
+                "   AND extractor_version < %s",
+                (
+                    text,
+                    text_sha256,
+                    script,
+                    precision,
+                    extractor_version,
+                    tenant_id,
+                    content_id,
+                    posted_at,
+                    extractor_version,
+                ),
+            )
+            return cur.rowcount > 0
 
     def counts(self, tenant_id: UUID) -> dict[str, int]:
         with self._conn.cursor() as cur:

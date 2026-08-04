@@ -248,6 +248,7 @@ class Pipeline:
                 text_sha256=hashlib.sha256(item.text.encode("utf-8")).hexdigest(),
                 lang=None,
                 extractor_version=result.extractor_version,
+                script=item.script,
             )
         self._extraction.record_run(
             uuid.uuid4(),

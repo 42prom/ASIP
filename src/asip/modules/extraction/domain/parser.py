@@ -26,7 +26,21 @@ from html.parser import HTMLParser
 
 #: Bumped whenever this parser's output could change for the same input.
 #: Reprocessing compares this against the stored value to decide what to redo.
-EXTRACTOR_VERSION = 1
+#:
+#: v2 — records the script an item is written in. Added deliberately as the
+#: first real exercise of D-13: content extracted by v1 has no script recorded,
+#: and the correct way to fix that is to re-parse the captures already stored,
+#: not to fetch anything again.
+EXTRACTOR_VERSION = 2
+
+#: Georgian, as codepoint bounds rather than literal characters.
+#:
+#: Written this way because a literal U+10FF trips ruff's confusable-character
+#: rule — a check for homoglyph attacks firing on the definition of the script
+#: this product treats as first-class (D-63). Codepoints say the same thing and
+#: are what a reader checks against the Unicode chart anyway.
+GEORGIAN_FIRST = 0x10A0  # Mkhedruli and Mtavruli block start
+GEORGIAN_LAST = 0x10FF
 
 #: Precision the source actually provides, detected per item (D-102).
 PRECISION_BY_LENGTH = {
@@ -48,6 +62,10 @@ class ExtractedItem:
     posted_at_raw: str
     posted_at: datetime
     timestamp_precision: str
+    #: The script the text is written in, or None when it cannot be told.
+    #: Deliberately not exposed to the detection path — see the migration that
+    #: removes it from v_content_for_detection.
+    script: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +166,7 @@ def parse_capture(html: bytes, minimum_expected_items: int = 1) -> ExtractionRes
                 author_handle=row["author"],
                 author_display_name=row["display_name"] or None,
                 text=_normalise_whitespace(row["text"]),
+                script=detect_script(row["text"]),
                 posted_at_raw=row["posted_at"],
                 posted_at=posted_at,
                 timestamp_precision=precision,
@@ -191,6 +210,31 @@ def _parse_timestamp(raw: str) -> tuple[datetime | None, str]:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return (parsed.astimezone(UTC), precision)
+
+
+def detect_script(text: str) -> str | None:
+    """Which alphabet the text uses. Not what it says.
+
+    Georgian is first-class in this product (D-63), and knowing which items are
+    written in it matters for display, for font selection, and eventually for
+    choosing an embedding model. It is a property of the characters, not of the
+    opinion — which is why it is safe to derive here and unsafe to publish to
+    the authenticity path, where any content-derived signal is forbidden (V-2).
+
+    Returns None rather than guessing on text with no letters at all: a string
+    of digits and punctuation has no script, and saying "latin" would be an
+    invention.
+    """
+    georgian = latin = 0
+    for character in text:
+        if GEORGIAN_FIRST <= ord(character) <= GEORGIAN_LAST:
+            georgian += 1
+        elif character.isalpha() and character.isascii():
+            latin += 1
+
+    if georgian == 0 and latin == 0:
+        return None
+    return "georgian" if georgian >= latin else "latin"
 
 
 def _normalise_whitespace(text: str) -> str:

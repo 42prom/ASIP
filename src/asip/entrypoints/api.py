@@ -183,6 +183,58 @@ def list_anchors() -> JSONResponse:
         return _json(PostgresEvidenceRepository(conn).anchors(DEFAULT_TENANT))
 
 
+@app.post("/api/reprocess")
+def reprocess() -> JSONResponse:
+    """Re-parse stored captures with the current extractor (D-13).
+
+    Contacts no source. The use case is constructed without a fetcher, so
+    "reprocessing accidentally refetched" is not a failure this endpoint can
+    produce — see modules/extraction/application/reprocess.py.
+    """
+    from asip.modules.evidence.adapters.capture_reader import WarcCaptureReader
+    from asip.modules.evidence.adapters.s3_object_store import S3ObjectStore
+    from asip.modules.evidence.adapters.warc_archive import WarcBundleArchive
+    from asip.modules.extraction.application.reprocess import ReprocessCaptures
+
+    settings = _settings()
+    with session() as conn:
+        archive = WarcBundleArchive(
+            S3ObjectStore(
+                bucket=settings.object_store_bucket,
+                endpoint_url=settings.object_store_url,
+                access_key=settings.object_store_key,
+                secret_key=settings.object_store_secret,
+            )
+        )
+        report = ReprocessCaptures(
+            WarcCaptureReader(conn, archive), PostgresExtractionRepository(conn)
+        ).execute(DEFAULT_TENANT)
+
+    return _json(
+        {
+            "summary": report.summary,
+            "captures_examined": report.captures_examined,
+            "captures_reprocessed": report.captures_reprocessed,
+            "items_updated": report.items_updated,
+            "captures_unavailable": report.captures_unavailable,
+            "items_needing_migration": report.items_needing_migration,
+            "fetches_performed": report.fetches_performed,
+            "problems": report.problems,
+        }
+    )
+
+
+@app.get("/api/reprocess/backlog")
+def reprocess_backlog() -> JSONResponse:
+    from asip.modules.extraction.domain.parser import EXTRACTOR_VERSION
+
+    with session() as conn:
+        rows = PostgresExtractionRepository(conn).reprocessing_backlog(
+            DEFAULT_TENANT, EXTRACTOR_VERSION
+        )
+    return _json({"current_extractor_version": EXTRACTOR_VERSION, "captures": rows})
+
+
 @app.get("/api/dashboard")
 def dashboard() -> JSONResponse:
     with session() as conn:
