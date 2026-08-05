@@ -144,6 +144,80 @@ class PostgresCollectionRepository:
                     (moment, failure_reason, source_id),
                 )
 
+    # ── scheduler runs ──────────────────────────────────────────────────────
+
+    def open_run(self, run_id: UUID, tenant_id: UUID, trace_id: str, started: datetime) -> None:
+        """Record that the scheduler woke up, before anything can go wrong.
+
+        Written and committed up front so a run that crashes mid-way still
+        leaves a row. A record only written on success cannot tell anyone about
+        the failures, which is the one thing it most needs to do.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO sch_collection.scheduler_runs "
+                "(run_id, tenant_id, trace_id, started_at, outcome, detail) "
+                "VALUES (%s, %s, %s, %s, 'failed', 'run did not complete')",
+                (run_id, tenant_id, trace_id, started),
+            )
+
+    def close_run(
+        self,
+        run_id: UUID,
+        tenant_id: UUID,
+        finished: datetime,
+        outcome: str,
+        detail: str,
+        counts: dict[str, int],
+        stages: str,
+    ) -> None:
+        """Close a run with what it actually did.
+
+        The row starts as 'failed'; this is what promotes it. A process killed
+        between open and close therefore leaves a failed run rather than a
+        missing one, and a missing row is the thing nobody notices.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE sch_collection.scheduler_runs "
+                "   SET finished_at = %s, outcome = %s, detail = %s, "
+                "       sources_due = %s, captures = %s, items = %s, findings = %s, "
+                "       exports = %s, held_for_review = %s, stages = %s::jsonb "
+                " WHERE run_id = %s AND tenant_id = %s",
+                (
+                    finished,
+                    outcome,
+                    detail,
+                    counts.get("sources_due", 0),
+                    counts.get("captures", 0),
+                    counts.get("items", 0),
+                    counts.get("findings", 0),
+                    counts.get("exports", 0),
+                    counts.get("held_for_review", 0),
+                    stages,
+                    run_id,
+                    tenant_id,
+                ),
+            )
+
+    def recent_runs(self, tenant_id: UUID, limit: int = 50) -> list[dict[str, Any]]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT run_id, trace_id, started_at, finished_at, outcome, detail, "
+                "       sources_due, captures, items, findings, exports, "
+                "       held_for_review, duration_seconds "
+                "  FROM sch_collection.v_scheduler_runs WHERE tenant_id = %s "
+                " ORDER BY started_at DESC LIMIT %s",
+                (tenant_id, limit),
+            )
+            columns = [d[0] for d in cur.description or ()]
+            return [dict(zip(columns, row, strict=True)) for row in cur.fetchall()]
+
+    def last_run(self, tenant_id: UUID) -> dict[str, Any] | None:
+        """The single fact a health check needs: when did this last work."""
+        runs = self.recent_runs(tenant_id, limit=1)
+        return runs[0] if runs else None
+
     def recent_jobs(self, tenant_id: UUID, limit: int = 50) -> list[dict[str, Any]]:
         with self._conn.cursor() as cur:
             cur.execute(

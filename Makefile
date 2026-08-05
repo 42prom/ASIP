@@ -26,7 +26,8 @@ LINT_IMPORTS := $(BIN)/lint-imports$(EXE)
 
 .PHONY: help install \
         lint layers test test-contracts test-independence test-isolation check \
-        migrate migrate-status seed-dev reset-dev run run-fetcher pipeline test-fixtures \n        validate-stix \
+        migrate migrate-status seed-dev reset-dev run run-fetcher pipeline test-fixtures \
+        validate-stix run-scheduler scheduler-once \
         verify-chain check-schemas evidence-roundtrip chain-verify-full \
         test-integration \
         shadow-run measure-precision spike0-fetch spike0-report corpus eval
@@ -153,6 +154,28 @@ endif
 # finding, which is the reason the exporter is L1.
 validate-stix:
 	$(PYTEST) tests/unit/export
+
+# The unattended run (WALKING_SKELETON exit criterion 1). Loops until stopped;
+# every tick is recorded, including the ones that find nothing due (D-68).
+# Export stays behind an analyst verdict — M-06 is not bypassed by a schedule.
+run-scheduler:
+ifndef ASIP_DB_URL
+	@echo NOT RUN: run-scheduler needs ASIP_DB_URL. >&2
+	@echo   make run-scheduler ASIP_DB_URL=postgresql://... [ASIP_SCHEDULER_TICK=60] >&2
+	@exit 1
+else
+	$(PY) -m asip.entrypoints.scheduler
+endif
+
+# One tick and exit — for cron-driven deployments and for proving the loop
+# without waiting on it.
+scheduler-once:
+ifndef ASIP_DB_URL
+	@echo NOT RUN: scheduler-once needs ASIP_DB_URL. >&2
+	@exit 1
+else
+	$(PY) -m asip.entrypoints.scheduler --once
+endif
 
 check-schemas:
 	@echo NOT IMPLEMENTED: check-schemas — no schemas exist. >&2

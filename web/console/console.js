@@ -460,6 +460,45 @@ screens.timeline = {
   },
 };
 
+screens.scheduler = {
+  title: "Scheduler",
+  note: "The unattended run. Every tick is recorded, including the ones that found nothing due — that is how an idle system is told apart from a stopped one (D-68, D-87).",
+  async render(root) {
+    const data = await api("/api/scheduler/runs");
+    const health = data.health || {};
+
+    root.append(el("p", {
+      class: health.status === "ok" ? "screen-note ok"
+        : health.status === "unverified" ? "screen-note" : "screen-note held",
+    }, health.detail || ""));
+
+    if (!data.runs.length) {
+      root.append(emptyState("unknown", "The scheduler has never run",
+        "Nothing is being collected on a schedule. Start it with: make run-scheduler ASIP_DB_URL=…"));
+      return;
+    }
+
+    root.append(table(
+      ["Started", "Outcome", "Took", "Due", "Captures", "Items", "Findings", "Held", "Detail"],
+      data.runs,
+      (r) => el("tr", { "data-row": "1" },
+        el("td", { class: "timestamp" }, ts(r.started_at)),
+        el("td", {}, el("span", { class: `run run-${r.outcome}` }, r.outcome)),
+        el("td", { class: "num" }, r.duration_seconds === null ? "—" : `${Number(r.duration_seconds).toFixed(1)}s`),
+        el("td", { class: "num" }, r.sources_due),
+        el("td", { class: "num" }, r.captures),
+        el("td", { class: "num" }, r.items),
+        el("td", { class: "num" }, r.findings),
+        el("td", { class: "num" }, r.held_for_review),
+        el("td", {}, r.detail))));
+
+    root.append(el("p", { class: "screen-note" },
+      "\"Held\" counts findings that stayed in Tier 1. A schedule does not bypass " +
+      "M-06: export follows an analyst's verdict, never a rule firing. An " +
+      "unattended run reaches detection and stops there by design."));
+  },
+};
+
 screens.graph = {
   title: "Graph View",
   note: "Co-participation: accounts that appeared in the same finding. An edge says two accounts were in one window — a property of the cluster, not a claim about either account.",
@@ -594,7 +633,7 @@ const dd = (text, cls) => el("dd", { class: cls || "" }, text ?? "—");
 
 // ── routing and keyboard ───────────────────────────────────────────────────
 
-const ORDER = ["dashboard", "sources", "captures", "bundles", "evidence",
+const ORDER = ["dashboard", "sources", "scheduler", "captures", "bundles", "evidence",
                "content", "findings", "timeline", "graph", "exports", "health"];
 
 let current = "dashboard";

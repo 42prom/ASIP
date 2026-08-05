@@ -1,0 +1,29 @@
+# Build context for the core image.
+#
+# The repository-wide .dockerignore is written for the fetch zone, which is
+# deliberately given as little as possible — no migrations, no config, no web
+# assets, because an image that does not contain them cannot be talked into
+# using them (D-11, V-3).
+#
+# The core image is the opposite case: it runs migrations, verifies evidence
+# against the shipped TSA certificates, and serves the console. BuildKit uses
+# <dockerfile>.dockerignore in preference to .dockerignore, so the two images
+# get the context each should have without either one loosening the other.
+
+.venv/
+.git/
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.import_linter_cache/
+
+# T2 and T3 (docs/REPO_POLICY.md). Never in an image, for the same reason they
+# are never in the T1 repository.
+docs/
+phases/
+.claude/
+spikes/
+*.env
+.env

@@ -21,11 +21,13 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import psycopg
 
+from asip.modules.collection.adapters.http_fetcher import HttpFetcher
 from asip.modules.evidence.adapters.postgres_repository import PostgresEvidenceRepository
-from asip.modules.evidence.adapters.rfc3161_tsa import Rfc3161TimestampAuthority
+from asip.modules.evidence.adapters.rfc3161_tsa import FREETSA_URL, Rfc3161TimestampAuthority
 from asip.modules.evidence.adapters.s3_object_store import S3ObjectStore
 from asip.modules.evidence.adapters.warc_archive import WarcBundleArchive
 from asip.modules.evidence.application.anchor_chain import AnchorChain
@@ -72,6 +74,11 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> Settings:
+        """Strict: every value must be configured. For deployment.
+
+        A missing variable raises here rather than defaulting to a development
+        credential that would appear to work.
+        """
         return cls(
             profile=os.environ.get("ASIP_PROFILE", "dev"),
             db_url=os.environ["ASIP_DB_URL"],
@@ -80,6 +87,28 @@ class Settings:
             object_store_secret=os.environ["ASIP_OBJECT_STORE_SECRET"],
             object_store_bucket=os.environ.get("ASIP_OBJECT_STORE_BUCKET", "asip-evidence"),
             tsa_url=os.environ["ASIP_TSA_URL"],
+            tsa_certificate=_read_optional(os.environ.get("ASIP_TSA_CERT", DEFAULT_TSA_CERT)),
+            tsa_roots=_read_optional(os.environ.get("ASIP_TSA_ROOTS", DEFAULT_TSA_ROOTS)),
+        )
+
+    @classmethod
+    def for_development(cls) -> Settings:
+        """Development defaults, so the stack runs with nothing configured.
+
+        The TSA certificates default to the shipped FreeTSA ones, so evidence
+        verification works out of the box and a deployment switching authority
+        overrides two environment variables and nothing else.
+        """
+        return cls(
+            profile=os.environ.get("ASIP_PROFILE", "dev"),
+            db_url=os.environ.get(
+                "ASIP_DB_URL", "postgresql://asip:asip_dev_only@127.0.0.1:5432/asip"
+            ),
+            object_store_url=os.environ.get("ASIP_OBJECT_STORE_URL", "http://127.0.0.1:9000"),
+            object_store_key=os.environ.get("ASIP_OBJECT_STORE_KEY", "asip"),
+            object_store_secret=os.environ.get("ASIP_OBJECT_STORE_SECRET", "asip_dev_only"),
+            object_store_bucket=os.environ.get("ASIP_OBJECT_STORE_BUCKET", "asip-evidence"),
+            tsa_url=os.environ.get("ASIP_TSA_URL", FREETSA_URL),
             tsa_certificate=_read_optional(os.environ.get("ASIP_TSA_CERT", DEFAULT_TSA_CERT)),
             tsa_roots=_read_optional(os.environ.get("ASIP_TSA_ROOTS", DEFAULT_TSA_ROOTS)),
         )
@@ -131,6 +160,39 @@ def build_evidence(settings: Settings, connection: psycopg.Connection) -> Eviden
         write_bundle=WriteBundle(archive, repository, tsa, SystemClock(), settings.tsa_url),
         verify_bundle=VerifyBundle(archive, repository, tsa),
         anchor_chain=AnchorChain(repository, tsa, SystemClock(), settings.tsa_url),
+    )
+
+
+def build_fetcher(settings: Settings) -> Any:
+    """Pick the fetch adapter. Callers never learn which they got.
+
+    With a queue configured, fetching happens in the isolated fetch zone — a
+    separate process on a network with no route to Postgres (D-11, V-3). With
+    no queue it happens in this process, which is convenient for development
+    and is the weaker arrangement: the credential boundary holds either way,
+    but only the queued path has a process and network boundary too.
+
+    Lives here rather than beside the web application because the scheduler
+    needs it as much as the API does, and a background worker that has to
+    import FastAPI to learn how to fetch a page is wired backwards.
+    """
+    queue_url = os.environ.get("ASIP_FETCH_QUEUE_URL")
+    if not queue_url:
+        return HttpFetcher()
+
+    # Imported lazily: the queued path pulls in redis and boto3, and a
+    # development run with no queue should not require either to be installed.
+    from asip.modules.collection.adapters.queued_fetcher import QueuedFetcher
+    from asip.modules.collection.adapters.redis_fetch_queue import RedisFetchQueue
+
+    return QueuedFetcher(
+        RedisFetchQueue(queue_url),
+        S3ObjectStore(
+            bucket=os.environ.get("ASIP_FETCH_BUCKET", "asip-captures"),
+            endpoint_url=settings.object_store_url,
+            access_key=settings.object_store_key,
+            secret_key=settings.object_store_secret,
+        ),
     )
 
 

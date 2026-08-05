@@ -17,7 +17,8 @@ import os
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -27,21 +28,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from asip.entrypoints.composition import (
-    DEFAULT_TSA_CERT,
-    DEFAULT_TSA_ROOTS,
-    Settings,
-    _read_optional,
-    build_evidence,
-)
+from asip.entrypoints.composition import Settings, build_evidence, build_fetcher
 from asip.entrypoints.exporting import assemble
 from asip.entrypoints.pipeline import BURST_RULE_NAME, Pipeline
 from asip.entrypoints.provenance import trace_finding
-from asip.modules.collection.adapters.http_fetcher import HttpFetcher
 from asip.modules.collection.adapters.postgres_repository import PostgresCollectionRepository
 from asip.modules.detection.adapters.postgres_repository import PostgresDetectionRepository
 from asip.modules.evidence.adapters.postgres_repository import PostgresEvidenceRepository
-from asip.modules.evidence.adapters.rfc3161_tsa import FREETSA_URL
 from asip.modules.export.adapters.postgres_repository import PostgresExportRepository
 from asip.modules.export.application.export_finding import ExportFinding, crosses_the_boundary
 from asip.modules.extraction.adapters.postgres_repository import PostgresExtractionRepository
@@ -59,52 +52,10 @@ def _dsn() -> str:
     return os.environ.get("ASIP_DB_URL", "postgresql://asip:asip_dev_only@127.0.0.1:5432/asip")
 
 
-def _settings() -> Settings:
-    """One place the runtime configuration is assembled.
-
-    Defaults are development values. The TSA certificates default to the
-    shipped FreeTSA ones, so verification works out of the box and a deployment
-    switching authority overrides two environment variables and nothing else.
-    """
-    return Settings(
-        profile=os.environ.get("ASIP_PROFILE", "dev"),
-        db_url=_dsn(),
-        object_store_url=os.environ.get("ASIP_OBJECT_STORE_URL", "http://127.0.0.1:9000"),
-        object_store_key=os.environ.get("ASIP_OBJECT_STORE_KEY", "asip"),
-        object_store_secret=os.environ.get("ASIP_OBJECT_STORE_SECRET", "asip_dev_only"),
-        object_store_bucket=os.environ.get("ASIP_OBJECT_STORE_BUCKET", "asip-evidence"),
-        tsa_url=os.environ.get("ASIP_TSA_URL", FREETSA_URL),
-        tsa_certificate=_read_optional(os.environ.get("ASIP_TSA_CERT", DEFAULT_TSA_CERT)),
-        tsa_roots=_read_optional(os.environ.get("ASIP_TSA_ROOTS", DEFAULT_TSA_ROOTS)),
-    )
-
-
-def _fetcher(settings: Settings) -> Any:
-    """Pick the fetch adapter. The pipeline never learns which it got.
-
-    With a queue configured, fetching happens in the isolated fetch zone — a
-    separate process on a network with no route to Postgres (D-11, V-3). With
-    no queue, it happens in this process, which is convenient for development
-    and is the weaker arrangement: the credential boundary holds either way,
-    but only the queued path has a process and network boundary too.
-    """
-    queue_url = os.environ.get("ASIP_FETCH_QUEUE_URL")
-    if not queue_url:
-        return HttpFetcher()
-
-    from asip.modules.collection.adapters.queued_fetcher import QueuedFetcher
-    from asip.modules.collection.adapters.redis_fetch_queue import RedisFetchQueue
-    from asip.modules.evidence.adapters.s3_object_store import S3ObjectStore
-
-    return QueuedFetcher(
-        RedisFetchQueue(queue_url),
-        S3ObjectStore(
-            bucket=os.environ.get("ASIP_FETCH_BUCKET", "asip-captures"),
-            endpoint_url=settings.object_store_url,
-            access_key=settings.object_store_key,
-            secret_key=settings.object_store_secret,
-        ),
-    )
+#: Both live in the composition root so the scheduler can use them without
+#: importing the web application (D-98).
+_settings = Settings.for_development
+_fetcher = build_fetcher
 
 
 @contextmanager
@@ -140,6 +91,12 @@ def _json(payload: Any) -> JSONResponse:
             return str(value)
         if isinstance(value, datetime):
             return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        # Postgres numerics arrive as Decimal, which json cannot encode.
+        # Converted to float here rather than at every call site: a duration or
+        # a count crossing this boundary is display data. Nothing that must not
+        # lose precision — hashes, identifiers, money — is ever a Decimal here.
+        if isinstance(value, Decimal):
+            return float(value)
         if isinstance(value, dict):
             return {k: convert(v) for k, v in value.items()}
         if isinstance(value, list | tuple):
@@ -430,6 +387,14 @@ def finding_detail(finding_id: UUID) -> JSONResponse:
     return _json(finding)
 
 
+@app.get("/api/scheduler/runs")
+def scheduler_runs() -> JSONResponse:
+    """Unattended run history, including the ticks that did nothing (D-68)."""
+    with session() as conn:
+        runs = PostgresCollectionRepository(conn).recent_runs(DEFAULT_TENANT)
+    return _json({"runs": runs, "health": _scheduler_check(runs[0] if runs else None)})
+
+
 @app.get("/api/findings/{finding_id}/trace")
 def finding_trace(finding_id: UUID) -> JSONResponse:
     """D-112 — which bytes this finding came from, in one query.
@@ -591,6 +556,59 @@ def graph() -> JSONResponse:
     )
 
 
+#: How long the scheduler may be quiet before that is itself the news. Three
+#: ticks at the default interval — one missed tick is a slow run, three is a
+#: process that is not coming back.
+SCHEDULER_SILENCE_LIMIT = timedelta(minutes=5)
+
+
+def _scheduler_check(last: dict[str, Any] | None) -> dict[str, Any]:
+    """Four states, because "no runs" and "runs, all idle" are different facts.
+
+    Reporting a never-started scheduler as `ok` because nothing failed is the
+    exact error D-68 is about: an empty result read as a healthy one.
+    """
+    if last is None:
+        return {
+            "name": "scheduler",
+            "status": "unverified",
+            "detail": (
+                "No unattended run has ever been recorded. The pipeline runs only when "
+                "someone presses the button. Start it with: make run-scheduler"
+            ),
+        }
+
+    started = last["started_at"]
+    age = datetime.now(UTC) - started
+    stale = age > SCHEDULER_SILENCE_LIMIT
+    ago = f"{int(age.total_seconds())}s ago"
+
+    if stale:
+        return {
+            "name": "scheduler",
+            "status": "failed",
+            "detail": (
+                f"Last run was {ago}, over the {int(SCHEDULER_SILENCE_LIMIT.total_seconds())}s "
+                "limit. The scheduler is not running. Nothing is being collected, and "
+                "nothing will report that fact except this check (D-87)."
+            ),
+        }
+    if last["outcome"] == "failed":
+        return {
+            "name": "scheduler",
+            "status": "failed",
+            "detail": f"Running, but the last run failed {ago}: {last['detail']}",
+        }
+    return {
+        "name": "scheduler",
+        "status": "ok",
+        "detail": (
+            f"Last run {ago}: {last['outcome']} — {last['detail']} "
+            "An idle run means nothing was due, not that nothing happened (D-68)."
+        ),
+    }
+
+
 @app.get("/api/health")
 def health() -> JSONResponse:
     """System health. Reports what is not working as loudly as what is.
@@ -733,6 +751,17 @@ def health() -> JSONResponse:
         )
     except Exception as exc:
         checks.append({"name": "evidence_references", "status": "failed", "detail": str(exc)})
+
+    # D-87 — a scheduler that stopped is the purest form of silent degradation:
+    # nothing complains, because nothing is running. The absence of runs is the
+    # signal, so it has to be checked for explicitly rather than inferred from
+    # an empty screen (D-68).
+    try:
+        with session() as conn:
+            last = PostgresCollectionRepository(conn).last_run(DEFAULT_TENANT)
+        checks.append(_scheduler_check(last))
+    except Exception as exc:
+        checks.append({"name": "scheduler", "status": "failed", "detail": str(exc)})
 
     queue_url = os.environ.get("ASIP_FETCH_QUEUE_URL")
     if not queue_url:

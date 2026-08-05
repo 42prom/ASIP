@@ -127,6 +127,46 @@ services:
     networks: [fetch]
     restart: unless-stopped
 
+  # ═══════════════════════════════════════════════════════════════════════
+  # THE UNATTENDED RUN
+  #
+  # Opt-in: `docker compose --profile scheduled up -d`. A scheduler that
+  # started by default would fetch real sources the moment anyone brought the
+  # stack up, which is the wrong default for a tool that spends money per
+  # capture (D-13) and touches other people's servers (V-6).
+  #
+  # Safe to run more than one — a Postgres advisory lock means only one holds
+  # a tick at a time. Export is NOT unattended: M-06 keeps it behind an
+  # analyst's verdict, so this reaches detection and stops.
+  # ═══════════════════════════════════════════════════════════════════════
+  scheduler:
+    profiles: [scheduled]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    command: ["python", "-m", "asip.entrypoints.scheduler"]
+    environment:
+      ASIP_DB_URL: postgresql://${POSTGRES_USER:-asip}:${POSTGRES_PASSWORD:-asip_dev_only}@postgres:5432/${POSTGRES_DB:-asip}
+      ASIP_OBJECT_STORE_URL: http://minio:9000
+      ASIP_OBJECT_STORE_KEY: ${MINIO_ROOT_USER:-asip}
+      ASIP_OBJECT_STORE_SECRET: ${MINIO_ROOT_PASSWORD:-asip_dev_only}
+      ASIP_SCHEDULER_TICK: ${ASIP_SCHEDULER_TICK:-60}
+      # Unset by default, so fetching happens in this process. Set it to
+      # redis://redis:6379/0 and bring up the fetcher for the D-11 isolation.
+      ASIP_FETCH_QUEUE_URL: ${ASIP_FETCH_QUEUE_URL:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [core]
+    # SIGTERM is handled: the loop finishes the tick in progress rather than
+    # leaving a capture without its bundle. Give it room to do that.
+    stop_grace_period: 90s
+    restart: unless-stopped
+
 volumes:
   pgdata:
   miniodata:

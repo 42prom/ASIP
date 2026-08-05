@@ -79,12 +79,28 @@ def discover(root: Path = MIGRATIONS_ROOT) -> list[Migration]:
         return found
 
     for module_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        seen: dict[str, Path] = {}
         for path in sorted(module_dir.glob("*.sql")):
             if path.name.endswith(".rollback.sql"):
                 continue
             version, _, name = path.stem.partition("_")
             if not version.isdigit():
                 raise ValueError(f"{path} does not start with a numeric version (NNN_name.sql)")
+
+            # A duplicate version is fatal, not a warning. The applied table is
+            # keyed on (module, version), so the second file with a given number
+            # is recorded as already applied and SILENTLY SKIPPED — the schema
+            # change never runs and nothing says so until something downstream
+            # fails against a table that was never created. Observed exactly
+            # once, which was enough.
+            if version in seen:
+                raise ValueError(
+                    f"duplicate migration version {module_dir.name}/{version}:\n"
+                    f"  {seen[version].name}\n  {path.name}\n"
+                    "Versions are unique per module — the second would be skipped in "
+                    "silence. Renumber the newer file."
+                )
+            seen[version] = path
             found.append(Migration(module_dir.name, version, name, path))
     return found
 
