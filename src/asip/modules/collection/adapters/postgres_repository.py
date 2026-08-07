@@ -19,6 +19,7 @@ class PostgresCollectionRepository:
         self,
         source_id: UUID,
         tenant_id: UUID,
+        project_id: UUID,
         name: str,
         url: str,
         platform: str,
@@ -34,14 +35,29 @@ class PostgresCollectionRepository:
                 # the only remedy was hand-editing the database. Configuration
                 # rows are not evidence; correcting one is the intended path.
                 "INSERT INTO sch_collection.sources "
-                "(source_id, tenant_id, name, url, platform, priority, is_canary, "
-                " interval_seconds) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+                "(source_id, tenant_id, project_id, name, url, platform, priority, "
+                " is_canary, interval_seconds) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (source_id) DO UPDATE SET "
                 "  name = EXCLUDED.name, url = EXCLUDED.url, "
                 "  platform = EXCLUDED.platform, priority = EXCLUDED.priority, "
                 "  is_canary = EXCLUDED.is_canary, "
-                "  interval_seconds = EXCLUDED.interval_seconds",
-                (source_id, tenant_id, name, url, platform, priority, is_canary, interval_seconds),
+                "  interval_seconds = EXCLUDED.interval_seconds, "
+                # A source moving between projects is a legitimate
+                # reorganisation, not a data correction — but it changes who can
+                # see its findings, so it is an audited admin action upstream.
+                "  project_id = EXCLUDED.project_id",
+                (
+                    source_id,
+                    tenant_id,
+                    project_id,
+                    name,
+                    url,
+                    platform,
+                    priority,
+                    is_canary,
+                    interval_seconds,
+                ),
             )
             cur.execute(
                 "INSERT INTO sch_collection.source_health (source_id, tenant_id) "
@@ -53,8 +69,8 @@ class PostgresCollectionRepository:
         """Read through the published view, not the tables (D-92)."""
         with self._conn.cursor() as cur:
             cur.execute(
-                "SELECT source_id, name, url, platform, priority, enabled, is_canary, "
-                "       interval_seconds, last_attempt_at, last_success_at, "
+                "SELECT source_id, project_id, name, url, platform, priority, enabled, "
+                "       is_canary, interval_seconds, last_attempt_at, last_success_at, "
                 "       consecutive_failures, last_failure_reason "
                 "  FROM sch_collection.v_sources_for_display "
                 " WHERE tenant_id = %s ORDER BY name",
@@ -71,7 +87,7 @@ class PostgresCollectionRepository:
         """
         with self._conn.cursor() as cur:
             cur.execute(
-                "SELECT source_id, name, url, platform, is_canary "
+                "SELECT source_id, project_id, name, url, platform, is_canary "
                 "  FROM sch_collection.v_sources_for_display "
                 " WHERE tenant_id = %s AND enabled "
                 "   AND (last_attempt_at IS NULL "

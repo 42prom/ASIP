@@ -16,9 +16,29 @@
  *   never presented as a verdict.
  */
 
+/* Thrown for a 403 so a screen can show *why* it was denied rather than a
+   generic failure. A denial carries the audit entry that recorded it, which is
+   what a support conversation should start from. */
+class Denied extends Error {
+  constructor(detail, entry) { super(detail); this.entry = entry; }
+}
+
 const api = async (path, options) => {
-  const response = await fetch(path, options);
+  const response = await fetch(path, { credentials: "same-origin", ...options });
+
+  if (response.status === 401) {
+    // The session went away — expired, revoked, or the user was disabled. Not
+    // an error to display: it means the login screen, and losing the current
+    // screen is the correct outcome rather than a half-rendered one.
+    showLogin();
+    throw new Error("not authenticated");
+  }
+  if (response.status === 403) {
+    const body = await response.json().catch(() => ({}));
+    throw new Denied(body.detail || "not permitted", body.audit_entry);
+  }
   if (!response.ok) throw new Error(`${path} → ${response.status}`);
+
   return response.headers.get("content-type")?.includes("json")
     ? response.json()
     : response.text();
@@ -633,8 +653,90 @@ const dd = (text, cls) => el("dd", { class: cls || "" }, text ?? "—");
 
 // ── routing and keyboard ───────────────────────────────────────────────────
 
+/* ── authentication ─────────────────────────────────────────────────────────
+   The console is a shell over the API and holds no data of its own, so it does
+   not decide what anyone may see — the API denies and this renders the denial.
+   `whoami` is used only to label the header and hide screens that would 403
+   anyway. Hiding a screen is a courtesy; the enforcement is server-side. */
+
+let me = null;
+
+function showLogin(message) {
+  document.getElementById("nav").replaceChildren();
+  const root = document.getElementById("screen");
+  const error = el("p", { class: "screen-note held" }, message || "");
+
+  const email = el("input", { type: "email", id: "login-email", autocomplete: "username",
+                              placeholder: "analyst@asip.local" });
+  const password = el("input", { type: "password", id: "login-password",
+                                 autocomplete: "current-password" });
+
+  const submit = async (event) => {
+    event.preventDefault();
+    error.textContent = "";
+    const response = await fetch("/api/auth/login", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: email.value, password: password.value }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      // One message for every failure, matching the API. Telling the user
+      // which half was wrong tells an attacker the same thing.
+      error.textContent = body.detail || "Sign in failed.";
+      return;
+    }
+    me = null;
+    await start();
+  };
+
+  root.replaceChildren(
+    el("h1", {}, "Sign in"),
+    el("p", { class: "screen-note" },
+      "The console shows one tenant's data and only the projects you are assigned to. " +
+      "Every screen you open is recorded in the audit log, including the ones you are " +
+      "refused (D-52)."),
+    el("form", { class: "login", onsubmit: submit },
+      el("label", { for: "login-email" }, "Email"), email,
+      el("label", { for: "login-password" }, "Password"), password,
+      el("button", { type: "submit" }, "Sign in")),
+    error);
+}
+
+screens.audit = {
+  title: "Audit Log",
+  note: "Who did what, and who was refused. Append-only and hash-chained — the database grants no UPDATE or DELETE on this table, to anyone (D-51).",
+  async render(root) {
+    const data = await api("/api/audit");
+
+    root.append(el("p", {
+      class: data.chain_intact ? "screen-note ok" : "screen-note held",
+    }, data.chain_intact
+      ? `Chain verified over ${data.entries.length} entries — no entry has been altered, removed or reordered.`
+      : `CHAIN BROKEN: ${data.problems.join("; ")}`));
+
+    if (!data.entries.length) {
+      root.append(emptyState("measured", "Nothing recorded yet",
+        "The log fills as people read and act. An empty audit log on a system in use is itself a finding."));
+      return;
+    }
+
+    root.append(table(["When", "#", "Actor", "Action", "Resource", "Outcome", "Why"],
+      data.entries, (e) => el("tr", { "data-row": "1" },
+        el("td", { class: "timestamp" }, ts(e.occurred_at)),
+        el("td", { class: "num" }, e.chain_index),
+        el("td", { class: "hash" }, shortHash(e.actor_id)),
+        el("td", {}, e.action.replace(/_/g, " ")),
+        el("td", { class: "hash" }, `${e.resource_type}/${shortHash(e.resource_id)}`),
+        el("td", {}, el("span", { class: `run run-${e.outcome === "allowed" ? "ok" : "failed"}` },
+          e.outcome)),
+        el("td", {}, e.reason))));
+  },
+};
+
 const ORDER = ["dashboard", "sources", "scheduler", "captures", "bundles", "evidence",
-               "content", "findings", "timeline", "graph", "exports", "health"];
+               "content", "findings", "timeline", "graph", "exports", "audit", "health"];
 
 let current = "dashboard";
 let cursor = -1;
@@ -657,16 +759,29 @@ async function render() {
   try {
     await screen.render(root, params);
   } catch (error) {
-    root.append(emptyState("unknown", "This screen could not load",
-      `${error.message}. The API may be unreachable or the database may not be migrated. ` +
-      `This is an unknown state, not an empty one — do not read it as "no data".`));
+    if (error instanceof Denied) {
+      // A denial is not a broken screen. Saying so plainly, with the audit
+      // entry that recorded it, is the difference between "this tool is
+      // broken" and "you are not assigned to this project" (D-49, D-68).
+      root.append(emptyState("unknown", "You do not have access to this",
+        `${error.message}` +
+        (error.entry ? ` — recorded in the audit log as ${error.entry}.` : "")));
+    } else if (error.message !== "not authenticated") {
+      root.append(emptyState("unknown", "This screen could not load",
+        `${error.message}. The API may be unreachable or the database may not be migrated. ` +
+        `This is an unknown state, not an empty one — do not read it as "no data".`));
+    }
   }
   drawNav();
 }
 
-function drawNav() {
+let hiddenScreens = [];
+
+function drawNav(hidden) {
+  if (hidden !== undefined) hiddenScreens = hidden;
   const nav = document.getElementById("nav");
-  nav.replaceChildren(...ORDER.map((name, i) =>
+  const visible = ORDER.filter((name) => !hiddenScreens.includes(name));
+  nav.replaceChildren(...visible.map((name, i) =>
     el("button", {
       "aria-current": String(name === current),
       onclick: () => go(name),
@@ -702,7 +817,9 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "g") { pendingG = true; return; }
   if (pendingG && /^[1-9]$/.test(event.key)) {
     pendingG = false;
-    const name = ORDER[Number(event.key) - 1];
+    // The visible list, not ORDER — otherwise the numbers on screen and the
+    // numbers the keyboard uses drift apart as soon as a screen is hidden.
+    const name = ORDER.filter((s) => !hiddenScreens.includes(s))[Number(event.key) - 1];
     if (name) go(name);
     return;
   }
@@ -724,6 +841,52 @@ document.addEventListener("keydown", (event) => {
 
 document.getElementById("run-pipeline").addEventListener("click", runPipeline);
 
-const initial = Object.fromEntries(new URLSearchParams(location.hash.slice(1)));
-current = screens[initial.screen] ? initial.screen : "dashboard";
-render();
+/* Who am I, and therefore what is worth showing.
+
+   The identity strip is not decoration: an analyst who cannot see which tenant
+   and which project they are looking at can misread one client's data as
+   another's, and the console gives no other clue (D-68). */
+function drawIdentity() {
+  const bar = document.getElementById("identity") || (() => {
+    const node = el("div", { id: "identity", class: "identity" });
+    document.getElementById("nav").after(node);
+    return node;
+  })();
+
+  if (!me) { bar.replaceChildren(); return; }
+  bar.replaceChildren(
+    el("span", { class: "hash" }, `tenant ${shortHash(me.tenant_id)}`),
+    el("span", {}, me.roles.join(" · ")),
+    el("span", { class: "hash" },
+      me.projects.length === 1
+        ? `project ${shortHash(me.projects[0])}`
+        : `${me.projects.length} projects`),
+    el("button", { class: "link", onclick: async () => {
+      await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
+      me = null;
+      showLogin("Signed out.");
+    } }, "sign out"));
+}
+
+async function start() {
+  try {
+    me = await api("/api/auth/me");
+  } catch {
+    // api() already routed a 401 to the login screen. Anything else means the
+    // API is unreachable, and the login form is still the honest next step.
+    if (!me) return;
+  }
+
+  // Screens the current roles cannot use are hidden rather than shown-and-403.
+  // A courtesy only: the API is what enforces this, and a console bug that
+  // showed one would still be refused.
+  const hidden = me.permissions.includes("read_audit") ? [] : ["audit"];
+  drawNav(hidden);
+  drawIdentity();
+
+  const initial = Object.fromEntries(new URLSearchParams(location.hash.slice(1)));
+  current = screens[initial.screen] ? initial.screen : "dashboard";
+  render();
+}
+
+start();

@@ -12,6 +12,7 @@ import psycopg
 import pytest
 
 from asip.modules.collection.adapters.postgres_repository import PostgresCollectionRepository
+from asip.modules.identity.domain.ids import default_project_id
 
 from .conftest import TENANT_A, as_tenant
 
@@ -22,6 +23,7 @@ def seed(conn: psycopg.Connection, url: str, interval: int = 3600) -> None:
     PostgresCollectionRepository(conn).add_source(
         source_id=SOURCE,  # type: ignore[arg-type]
         tenant_id=TENANT_A,
+        project_id=default_project_id(TENANT_A),
         name="Canary",
         url=url,
         platform="canary",

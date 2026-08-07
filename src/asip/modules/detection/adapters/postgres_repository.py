@@ -54,6 +54,7 @@ class PostgresDetectionRepository:
         tenant_id: UUID,
         rule_id: UUID,
         source_id: UUID,
+        project_id: UUID,
         trace_id: str,
         window_start: datetime,
         window_end: datetime,
@@ -73,14 +74,16 @@ class PostgresDetectionRepository:
         with self._conn.transaction(), self._conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO sch_detection.findings "
-                "(finding_id, tenant_id, rule_id, source_id, trace_id, window_start, "
-                " window_end, item_count, account_count, signals, evidence_refs, shadow) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                "(finding_id, tenant_id, rule_id, source_id, project_id, trace_id, "
+                " window_start, window_end, item_count, account_count, signals, "
+                " evidence_refs, shadow) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 (
                     finding_id,
                     tenant_id,
                     rule_id,
                     source_id,
+                    project_id,
                     trace_id,
                     window_start,
                     window_end,
@@ -99,15 +102,24 @@ class PostgresDetectionRepository:
                     (finding_id, tenant_id, account_id),
                 )
 
-    def list_findings(self, tenant_id: UUID, limit: int = 100) -> list[dict[str, Any]]:
+    def list_findings(
+        self, tenant_id: UUID, project_id: UUID, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Findings in one project (D-49).
+
+        `project_id` is required, not optional. An optional filter defaults to
+        "all projects" the moment a caller omits it, which is the tenant-wide
+        read that must not exist — and the omission would be invisible.
+        """
         with self._conn.cursor() as cur:
             cur.execute(
-                "SELECT finding_id, rule_id, rule_name, source_id, trace_id, "
-                "       window_start, window_end, item_count, account_count, signals, "
-                "       evidence_refs, shadow, detected_at "
+                "SELECT finding_id, rule_id, rule_name, source_id, project_id, "
+                "       trace_id, window_start, window_end, item_count, account_count, "
+                "       signals, evidence_refs, shadow, detected_at "
                 "  FROM sch_detection.v_findings_for_review "
-                " WHERE tenant_id = %s ORDER BY detected_at DESC LIMIT %s",
-                (tenant_id, limit),
+                " WHERE tenant_id = %s AND project_id = %s "
+                " ORDER BY detected_at DESC LIMIT %s",
+                (tenant_id, project_id, limit),
             )
             columns = [d[0] for d in cur.description or ()]
             return [dict(zip(columns, row, strict=True)) for row in cur.fetchall()]

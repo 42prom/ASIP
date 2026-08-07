@@ -24,10 +24,18 @@ from typing import Any
 from uuid import UUID
 
 import psycopg
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
+from asip.entrypoints.auth import (
+    SESSION_COOKIE,
+    authenticator,
+    guard,
+    owner_connection,
+    principal_of,
+    require_session,
+)
 from asip.entrypoints.composition import Settings, build_evidence, build_fetcher
 from asip.entrypoints.exporting import assemble
 from asip.entrypoints.pipeline import BURST_RULE_NAME, Pipeline
@@ -38,14 +46,47 @@ from asip.modules.evidence.adapters.postgres_repository import PostgresEvidenceR
 from asip.modules.export.adapters.postgres_repository import PostgresExportRepository
 from asip.modules.export.application.export_finding import ExportFinding, crosses_the_boundary
 from asip.modules.extraction.adapters.postgres_repository import PostgresExtractionRepository
+from asip.modules.identity.adapters.postgres_repository import PostgresIdentityRepository
+from asip.modules.identity.application.authenticate import AuthenticationFailed
+from asip.modules.identity.application.guard import NotPermitted
+from asip.modules.identity.domain.audit import verify_chain as verify_audit_chain
+from asip.modules.identity.domain.roles import Permission, Principal
 from asip.modules.review.adapters.postgres_repository import VERDICTS, PostgresReviewRepository
 
 WEB_ROOT = Path(__file__).resolve().parents[3] / "web"
 CANARY_ROOT = WEB_ROOT / "canary"
 
+#: Only ever a default for the LOGIN FORM, when a caller does not name a tenant.
+#: Every other use of a tenant id in this module comes from the authenticated
+#: session via `acting()`.
+#:
+#: Deliberately not called `tenant`: a module-level name matching the local one
+#: handlers bind would make a handler that forgot to bind it silently fall back
+#: to this value instead of failing. That is a cross-tenant read produced by a
+#: missing line, which is the exact failure this whole module exists to prevent.
+#: A test asserts no module-level `tenant` exists.
 DEFAULT_TENANT = UUID(os.environ.get("ASIP_TENANT_ID", "aaaaaaaa-0000-4000-8000-0000000000d1"))
 
 app = FastAPI(title="ASIP", version="0.1.0", docs_url="/api/docs")
+
+# Default deny. Every /api/ path needs a session except the allowlist in
+# auth.py, so an endpoint added later is private until someone deliberately
+# makes it public (D-47, V-7).
+app.middleware("http")(require_session)
+
+
+@app.exception_handler(NotPermitted)
+async def _denied(_request: Request, exc: NotPermitted) -> JSONResponse:
+    """A denial is a 403 that says why and names its audit entry.
+
+    The entry id is in the response so a support conversation starts from
+    "denial <id>" rather than a screenshot — and a conversation that starts
+    from a screenshot ends in a widened permission.
+    """
+    return JSONResponse(
+        {"detail": str(exc), "audit_entry": str(exc.entry_id)},
+        status_code=403,
+    )
 
 
 def _dsn() -> str:
@@ -59,24 +100,111 @@ _fetcher = build_fetcher
 
 
 @contextmanager
-def session() -> Iterator[psycopg.Connection]:
+def session(tenant_id: UUID) -> Iterator[psycopg.Connection]:
     """A connection scoped to one tenant, as the application role.
 
-    `SET LOCAL ROLE asip_app` and the tenant GUC are set per request, not per
-    process. Connection pools reuse connections across requests, and a tenant
-    id that outlived its request would be a cross-tenant read no policy could
-    catch (V-7).
+    The tenant is an argument rather than a module constant, and every caller
+    passes the one on the authenticated principal. That is the whole change:
+    previously the API served a tenant taken from configuration, so a bug in a
+    handler could not cross tenants because there was only one. Now the boundary
+    is real, and RLS is what holds it.
+
+    SET ROLE and the GUC are set per request, not per process. A tenant id that
+    outlived its request would be a cross-tenant read no policy could catch (V-7).
     """
     with psycopg.connect(_dsn()) as conn:
         with conn.cursor() as cur:
             cur.execute("SET ROLE asip_app")
-            cur.execute("SELECT set_config('asip.tenant_id', %s, false)", (str(DEFAULT_TENANT),))
+            cur.execute("SELECT set_config('asip.tenant_id', %s, false)", (str(tenant_id),))
         try:
             yield conn
             conn.commit()
         except Exception:
             conn.rollback()
             raise
+
+
+def acting(request: Request) -> tuple[Principal, UUID]:
+    """The principal and its tenant. One call so neither is fetched without the other."""
+    principal = principal_of(request)
+    return principal, principal.tenant_id
+
+
+def scope_of(request: Request, principal: Principal) -> UUID:
+    """Which project this request is about (D-49).
+
+    From `?project=` when given, otherwise the principal's only project. A
+    principal with several must name one: guessing would silently pick a scope
+    the analyst did not intend, and the guess would be invisible in the audit
+    entry that records the read.
+
+    Returns a sentinel rather than raising when there is no project, so the
+    Guard produces the denial — one place decides, and the denial is audited.
+    """
+    named = request.query_params.get("project")
+    if named:
+        try:
+            return UUID(named)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="project is not a uuid") from None
+
+    if len(principal.project_ids) == 1:
+        return next(iter(principal.project_ids))
+
+    # No project, or an ambiguous choice. UUID(int=0) is assigned to nobody, so
+    # the guard denies and says why.
+    return UUID(int=0)
+
+
+def permit(
+    request: Request,
+    principal: Principal,
+    permission: Permission,
+    *,
+    resource_type: str,
+    resource_id: str,
+) -> UUID:
+    """Authorize a tenant-data read and record it. Returns the project scope.
+
+    Every data endpoint goes through here, so "checked the permission" and
+    "wrote the audit entry" cannot come apart (D-52).
+
+    KNOWN GAP, stated rather than hidden: captures, bundles and extracted
+    content do not yet carry project_id, so for those endpoints the permission
+    is checked against the caller's project while the rows returned are the
+    tenant's. That is coarser than D-49 requires. Findings and their exports are
+    correctly scoped because sch_detection.findings carries the column. Closing
+    it means project_id on sch_evidence.captures and sch_extraction.content, and
+    a test pins the gap so it cannot be quietly forgotten.
+    """
+    project_id = scope_of(request, principal)
+    guard(principal.tenant_id).require(
+        principal,
+        permission,
+        tenant_id=principal.tenant_id,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        project_id=project_id,
+    )
+    return project_id
+
+
+def permit_admin(
+    principal: Principal,
+    permission: Permission,
+    *,
+    resource_type: str,
+    resource_id: str,
+) -> None:
+    """Authorize an administrative action. No project, because these are not
+    reads of project data — they configure or operate the tenant."""
+    guard(principal.tenant_id).require(
+        principal,
+        permission,
+        tenant_id=principal.tenant_id,
+        resource_type=resource_type,
+        resource_id=resource_id,
+    )
 
 
 def _json(payload: Any) -> JSONResponse:
@@ -106,16 +234,165 @@ def _json(payload: Any) -> JSONResponse:
     return JSONResponse(convert(payload))
 
 
+# ── authentication ──────────────────────────────────────────────────────────
+
+
+@app.post("/api/auth/login")
+def login(payload: dict[str, str]) -> JSONResponse:
+    """Exchange credentials for a session.
+
+    The tenant is supplied by the caller because email addresses are unique per
+    tenant, not globally — the same person may hold accounts at two client
+    organisations, and a global lookup would leak that an address is registered
+    somewhere. The console sends the tenant it was configured with.
+    """
+    try:
+        tenant = UUID(payload.get("tenant_id") or str(DEFAULT_TENANT))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="tenant_id is not a uuid") from None
+
+    with owner_connection() as conn:
+        try:
+            opened = authenticator(conn).login(
+                tenant, payload.get("email", ""), payload.get("password", "")
+            )
+        except AuthenticationFailed as failure:
+            conn.rollback()
+            # One message for wrong password, unknown address and disabled
+            # account alike. Distinguishing them tells an attacker which half of
+            # the guess was right.
+            raise HTTPException(status_code=401, detail=str(failure)) from None
+        conn.commit()
+
+    body = _json(
+        {
+            "ok": True,
+            "user_id": opened.user_id,
+            "tenant_id": opened.tenant_id,
+            "expires_at": opened.expires_at,
+        }
+    )
+    # HttpOnly so script cannot read it; SameSite=Lax so it does not ride along
+    # on a cross-site request. Not Secure in development, because the console is
+    # served over http on localhost and a Secure cookie would simply never be
+    # sent — set ASIP_COOKIE_SECURE=1 behind TLS.
+    body.set_cookie(
+        SESSION_COOKIE,
+        opened.token,
+        httponly=True,
+        samesite="lax",
+        secure=os.environ.get("ASIP_COOKIE_SECURE") == "1",
+    )
+    return body
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request) -> JSONResponse:
+    """Revoke this session. Idempotent.
+
+    No permission check: ending your own session is not an action anyone needs
+    authorization for, and a logout that could be denied would leave someone
+    unable to sign out of a shared machine.
+    """
+    _principal, tenant = acting(request)
+    with session(tenant) as conn:
+        authenticator(conn).logout(tenant, request.state.session_id)
+
+    body = _json({"ok": True})
+    body.delete_cookie(SESSION_COOKIE)
+    return body
+
+
+@app.get("/api/auth/me")
+def whoami(request: Request) -> JSONResponse:
+    """Who the console is logged in as, and what it may therefore show.
+
+    The console uses this to decide which screens to offer. That is a
+    convenience, never the enforcement: every endpoint checks for itself, and a
+    console that offered a screen it should not would still get a 403.
+    """
+    principal, tenant = acting(request)
+    return _json(
+        {
+            "user_id": principal.user_id,
+            "tenant_id": tenant,
+            "roles": sorted(r.value for r in principal.roles),
+            "projects": sorted(str(p) for p in principal.project_ids),
+            "permissions": sorted(p.value for p in principal.role_permissions()),
+            "grants": [
+                {
+                    "tenant_id": str(g.tenant_id),
+                    "permissions": sorted(p.value for p in g.permissions),
+                    "justification": g.justification,
+                    "expires_at": g.expires_at,
+                }
+                for g in principal.grants
+            ],
+        }
+    )
+
+
+@app.get("/api/audit")
+def audit_log(request: Request) -> JSONResponse:
+    """The audit trail (D-51, D-52). Requires READ_AUDIT, which only auditors hold.
+
+    Reading the audit log is itself audited. Not circular cleverness — "who read
+    the record of who read what" is where an insider investigation starts.
+    """
+    principal, tenant = acting(request)
+    with session(tenant) as conn:
+        guard(principal.tenant_id).require(
+            principal,
+            Permission.READ_AUDIT,
+            tenant_id=tenant,
+            resource_type="audit_log",
+            resource_id=str(tenant),
+        )
+        entries = PostgresIdentityRepository(conn).audit_entries(tenant, limit=200)
+        # Verified on read, ascending, because a chain nobody checks is a chain
+        # an attacker can edit at leisure (T-008).
+        problems = verify_audit_chain(list(reversed(entries)))
+
+    return _json(
+        {
+            "entries": [
+                {
+                    "entry_id": e.entry_id,
+                    "chain_index": e.chain_index,
+                    "actor_id": e.actor_id,
+                    "action": e.action,
+                    "resource_type": e.resource_type,
+                    "resource_id": e.resource_id,
+                    "outcome": e.outcome.value,
+                    "reason": e.reason,
+                    "occurred_at": e.occurred_at,
+                    "entry_hash": e.entry_hash,
+                }
+                for e in entries
+            ],
+            "chain_intact": not problems,
+            "problems": list(problems),
+        }
+    )
+
+
 # ── pipeline ────────────────────────────────────────────────────────────────
 
 
 @app.post("/api/pipeline/run")
-def run_pipeline() -> JSONResponse:
+def run_pipeline(request: Request) -> JSONResponse:
     """Run one full pass and return what every stage did."""
+    principal, tenant = acting(request)
     settings = _settings()
-    with session() as conn:
+    with session(tenant) as conn:
+        permit_admin(
+            principal,
+            Permission.MANAGE_PROJECTS,
+            resource_type="pipeline",
+            resource_id=str(tenant),
+        )
         container = build_evidence(settings, conn)
-        pipeline = Pipeline(conn, container.write_bundle, _fetcher(settings), DEFAULT_TENANT)
+        pipeline = Pipeline(conn, container.write_bundle, _fetcher(settings), tenant)
         result = pipeline.run()
     return _json(result.as_dict())
 
@@ -124,40 +401,62 @@ def run_pipeline() -> JSONResponse:
 
 
 @app.post("/api/chain/anchor")
-def anchor_chain() -> JSONResponse:
+def anchor_chain(request: Request) -> JSONResponse:
     """Attest the current chain head to an external authority (D-90).
 
     Run on a schedule in production. Exposed as a button here because the point
     of this phase is that everything the system does is visible.
     """
-    with session() as conn:
-        result = build_evidence(_settings(), conn).anchor_chain.execute(DEFAULT_TENANT)
+    principal, tenant = acting(request)
+    with session(tenant) as conn:
+        permit_admin(
+            principal,
+            Permission.MANAGE_PROJECTS,
+            resource_type="hash_chain",
+            resource_id=str(tenant),
+        )
+        result = build_evidence(_settings(), conn).anchor_chain.execute(tenant)
     return _json(
         {"status": result.status, "detail": result.detail, "chain_index": result.chain_index}
     )
 
 
 @app.get("/api/chain/anchors")
-def list_anchors() -> JSONResponse:
-    with session() as conn:
-        return _json(PostgresEvidenceRepository(conn).anchors(DEFAULT_TENANT))
+def list_anchors(request: Request) -> JSONResponse:
+    principal, tenant = acting(request)
+    with session(tenant) as conn:
+        _project_gap = permit(
+            request,
+            principal,
+            Permission.READ_EVIDENCE,
+            resource_type="hash_chain",
+            resource_id=str(tenant),
+        )
+        return _json(PostgresEvidenceRepository(conn).anchors(tenant))
 
 
 @app.post("/api/reprocess")
-def reprocess() -> JSONResponse:
+def reprocess(request: Request) -> JSONResponse:
     """Re-parse stored captures with the current extractor (D-13).
 
     Contacts no source. The use case is constructed without a fetcher, so
     "reprocessing accidentally refetched" is not a failure this endpoint can
     produce — see modules/extraction/application/reprocess.py.
     """
+    principal, tenant = acting(request)
     from asip.modules.evidence.adapters.capture_reader import WarcCaptureReader
     from asip.modules.evidence.adapters.s3_object_store import S3ObjectStore
     from asip.modules.evidence.adapters.warc_archive import WarcBundleArchive
     from asip.modules.extraction.application.reprocess import ReprocessCaptures
 
     settings = _settings()
-    with session() as conn:
+    with session(tenant) as conn:
+        permit_admin(
+            principal,
+            Permission.MANAGE_PROJECTS,
+            resource_type="extraction",
+            resource_id=str(tenant),
+        )
         archive = WarcBundleArchive(
             S3ObjectStore(
                 bucket=settings.object_store_bucket,
@@ -168,7 +467,7 @@ def reprocess() -> JSONResponse:
         )
         report = ReprocessCaptures(
             WarcCaptureReader(conn, archive), PostgresExtractionRepository(conn)
-        ).execute(DEFAULT_TENANT)
+        ).execute(tenant)
 
     return _json(
         {
@@ -185,30 +484,43 @@ def reprocess() -> JSONResponse:
 
 
 @app.get("/api/reprocess/backlog")
-def reprocess_backlog() -> JSONResponse:
+def reprocess_backlog(request: Request) -> JSONResponse:
+    principal, tenant = acting(request)
     from asip.modules.extraction.domain.parser import EXTRACTOR_VERSION
 
-    with session() as conn:
-        rows = PostgresExtractionRepository(conn).reprocessing_backlog(
-            DEFAULT_TENANT, EXTRACTOR_VERSION
+    with session(tenant) as conn:
+        permit_admin(
+            principal,
+            Permission.MANAGE_PROJECTS,
+            resource_type="extraction",
+            resource_id=str(tenant),
         )
+        rows = PostgresExtractionRepository(conn).reprocessing_backlog(tenant, EXTRACTOR_VERSION)
     return _json({"current_extractor_version": EXTRACTOR_VERSION, "captures": rows})
 
 
 @app.get("/api/dashboard")
-def dashboard() -> JSONResponse:
-    with session() as conn:
-        sources = PostgresCollectionRepository(conn).list_sources(DEFAULT_TENANT)
-        jobs = PostgresCollectionRepository(conn).recent_jobs(DEFAULT_TENANT, limit=5)
-        extraction = PostgresExtractionRepository(conn).counts(DEFAULT_TENANT)
-        findings = PostgresDetectionRepository(conn).counts(DEFAULT_TENANT)
-        exports = PostgresExportRepository(conn).list_exports(DEFAULT_TENANT, limit=5)
+def dashboard(request: Request) -> JSONResponse:
+    principal, tenant = acting(request)
+    with session(tenant) as conn:
+        _project_gap = permit(
+            request,
+            principal,
+            Permission.READ_FINDINGS,
+            resource_type="dashboard",
+            resource_id=str(tenant),
+        )
+        sources = PostgresCollectionRepository(conn).list_sources(tenant)
+        jobs = PostgresCollectionRepository(conn).recent_jobs(tenant, limit=5)
+        extraction = PostgresExtractionRepository(conn).counts(tenant)
+        findings = PostgresDetectionRepository(conn).counts(tenant)
+        exports = PostgresExportRepository(conn).list_exports(tenant, limit=5)
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT count(*), "
                 "       count(*) FILTER (WHERE captured_at > now() - interval '24 hours') "
                 "  FROM sch_evidence.evidence_bundles WHERE tenant_id = %s",
-                (DEFAULT_TENANT,),
+                (tenant,),
             )
             bundles = cur.fetchone() or (0, 0)
 
@@ -236,20 +548,43 @@ def dashboard() -> JSONResponse:
 
 
 @app.get("/api/sources")
-def sources() -> JSONResponse:
-    with session() as conn:
-        return _json(PostgresCollectionRepository(conn).list_sources(DEFAULT_TENANT))
+def sources(request: Request) -> JSONResponse:
+    principal, tenant = acting(request)
+    with session(tenant) as conn:
+        permit_admin(
+            principal,
+            Permission.MANAGE_PROJECTS,
+            resource_type="source",
+            resource_id=str(tenant),
+        )
+        return _json(PostgresCollectionRepository(conn).list_sources(tenant))
 
 
 @app.get("/api/captures")
-def captures() -> JSONResponse:
-    with session() as conn:
-        return _json(PostgresCollectionRepository(conn).recent_jobs(DEFAULT_TENANT, limit=200))
+def captures(request: Request) -> JSONResponse:
+    principal, tenant = acting(request)
+    with session(tenant) as conn:
+        _project_gap = permit(
+            request,
+            principal,
+            Permission.READ_EVIDENCE,
+            resource_type="capture",
+            resource_id="*",
+        )
+        return _json(PostgresCollectionRepository(conn).recent_jobs(tenant, limit=200))
 
 
 @app.get("/api/bundles")
-def bundles() -> JSONResponse:
-    with session() as conn, conn.cursor() as cur:
+def bundles(request: Request) -> JSONResponse:
+    principal, tenant = acting(request)
+    with session(tenant) as conn, conn.cursor() as cur:
+        _project_gap = permit(
+            request,
+            principal,
+            Permission.READ_EVIDENCE,
+            resource_type="evidence_bundle",
+            resource_id="*",
+        )
         cur.execute(
             "SELECT b.bundle_id, b.capture_id, b.trace_id, b.source_url, b.captured_at, "
             "       b.manifest_sha256, c.chain_index, c.entry_hash, c.prev_hash, c.algorithm, "
@@ -259,7 +594,7 @@ def bundles() -> JSONResponse:
             "  JOIN sch_evidence.hash_chain c "
             "    ON c.tenant_id = b.tenant_id AND c.bundle_id = b.bundle_id "
             " WHERE b.tenant_id = %s ORDER BY c.chain_index DESC LIMIT 200",
-            (DEFAULT_TENANT,),
+            (tenant,),
         )
         columns = [
             "bundle_id",
@@ -278,9 +613,17 @@ def bundles() -> JSONResponse:
 
 
 @app.get("/api/bundles/{bundle_id}")
-def bundle_detail(bundle_id: UUID) -> JSONResponse:
+def bundle_detail(request: Request, bundle_id: UUID) -> JSONResponse:
     """The evidence viewer's data, including a live re-verification."""
-    with session() as conn:
+    principal, tenant = acting(request)
+    with session(tenant) as conn:
+        _project_gap = permit(
+            request,
+            principal,
+            Permission.READ_EVIDENCE,
+            resource_type="evidence_bundle",
+            resource_id=str(bundle_id),
+        )
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT b.bundle_id, b.capture_id, b.trace_id, b.source_url, b.captured_at, "
@@ -290,7 +633,7 @@ def bundle_detail(bundle_id: UUID) -> JSONResponse:
                 "  JOIN sch_evidence.hash_chain c "
                 "    ON c.tenant_id = b.tenant_id AND c.bundle_id = b.bundle_id "
                 " WHERE b.tenant_id = %s AND b.bundle_id = %s",
-                (DEFAULT_TENANT, bundle_id),
+                (tenant, bundle_id),
             )
             row = cur.fetchone()
             if row is None:
@@ -314,7 +657,7 @@ def bundle_detail(bundle_id: UUID) -> JSONResponse:
             cur.execute(
                 "SELECT authority_url, obtained_at, octet_length(token) "
                 "  FROM sch_evidence.tsa_tokens WHERE tenant_id = %s AND bundle_id = %s",
-                (DEFAULT_TENANT, bundle_id),
+                (tenant, bundle_id),
             )
             record["timestamps"] = [
                 {"authority_url": a, "obtained_at": o, "token_bytes": n}
@@ -322,11 +665,11 @@ def bundle_detail(bundle_id: UUID) -> JSONResponse:
             ]
 
         record["manifest"] = json.loads(record["manifest"])
-        record["verification"] = _verify(conn, record)
+        record["verification"] = _verify(conn, tenant, record)
     return _json(record)
 
 
-def _verify(conn: psycopg.Connection, record: dict[str, Any]) -> dict[str, Any]:
+def _verify(conn: psycopg.Connection, tenant: UUID, record: dict[str, Any]) -> dict[str, Any]:
     """Re-verify on demand — the one-click check the product promises.
 
     Built from the same container the pipeline writes with, so the timestamp is
@@ -344,7 +687,7 @@ def _verify(conn: psycopg.Connection, record: dict[str, Any]) -> dict[str, Any]:
     result = verifier.execute(
         BundleRef(
             bundle_id=record["bundle_id"],
-            tenant_id=DEFAULT_TENANT,
+            tenant_id=tenant,
             chain_index=record["chain_index"],
             manifest_sha256=record["manifest_sha256"],
             tsa_status=TsaStatus.PENDING,
@@ -360,43 +703,72 @@ def _verify(conn: psycopg.Connection, record: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.get("/api/content")
-def content() -> JSONResponse:
-    with session() as conn:
-        return _json(PostgresExtractionRepository(conn).recent_content(DEFAULT_TENANT))
+def content(request: Request) -> JSONResponse:
+    principal, tenant = acting(request)
+    with session(tenant) as conn:
+        _project_gap = permit(
+            request,
+            principal,
+            Permission.READ_CONTENT,
+            resource_type="content",
+            resource_id="*",
+        )
+        return _json(PostgresExtractionRepository(conn).recent_content(tenant))
 
 
 @app.get("/api/findings")
-def findings() -> JSONResponse:
-    with session() as conn:
-        items = PostgresDetectionRepository(conn).list_findings(DEFAULT_TENANT)
-        verdicts = PostgresReviewRepository(conn).current_verdicts(DEFAULT_TENANT)
+def findings(request: Request) -> JSONResponse:
+    principal, tenant = acting(request)
+    with session(tenant) as conn:
+        _project_gap = permit(
+            request,
+            principal,
+            Permission.READ_FINDINGS,
+            resource_type="finding",
+            resource_id="*",
+        )
+        items = PostgresDetectionRepository(conn).list_findings(tenant, _project_gap)
+        verdicts = PostgresReviewRepository(conn).current_verdicts(tenant)
     for item in items:
         item["verdict"] = verdicts.get(str(item["finding_id"]))
     return _json(items)
 
 
 @app.get("/api/findings/{finding_id}")
-def finding_detail(finding_id: UUID) -> JSONResponse:
-    with session() as conn:
-        finding = PostgresDetectionRepository(conn).get_finding(DEFAULT_TENANT, finding_id)
+def finding_detail(request: Request, finding_id: UUID) -> JSONResponse:
+    principal, tenant = acting(request)
+    with session(tenant) as conn:
+        _project_gap = permit(
+            request,
+            principal,
+            Permission.READ_FINDINGS,
+            resource_type="finding",
+            resource_id=str(finding_id),
+        )
+        finding = PostgresDetectionRepository(conn).get_finding(tenant, finding_id)
         if finding is None:
             raise HTTPException(status_code=404, detail="no such finding")
-        finding["verdict_history"] = PostgresReviewRepository(conn).history(
-            DEFAULT_TENANT, finding_id
-        )
+        finding["verdict_history"] = PostgresReviewRepository(conn).history(tenant, finding_id)
     return _json(finding)
 
 
 @app.get("/api/scheduler/runs")
-def scheduler_runs() -> JSONResponse:
+def scheduler_runs(request: Request) -> JSONResponse:
     """Unattended run history, including the ticks that did nothing (D-68)."""
-    with session() as conn:
-        runs = PostgresCollectionRepository(conn).recent_runs(DEFAULT_TENANT)
+    principal, tenant = acting(request)
+    with session(tenant) as conn:
+        permit_admin(
+            principal,
+            Permission.MANAGE_PROJECTS,
+            resource_type="scheduler",
+            resource_id=str(tenant),
+        )
+        runs = PostgresCollectionRepository(conn).recent_runs(tenant)
     return _json({"runs": runs, "health": _scheduler_check(runs[0] if runs else None)})
 
 
 @app.get("/api/findings/{finding_id}/trace")
-def finding_trace(finding_id: UUID) -> JSONResponse:
+def finding_trace(request: Request, finding_id: UUID) -> JSONResponse:
     """D-112 — which bytes this finding came from, in one query.
 
     The question gets asked when a finding is disputed, so the answer has to be
@@ -404,8 +776,16 @@ def finding_trace(finding_id: UUID) -> JSONResponse:
     changes between them, and an answer that can disagree with itself is not
     evidence.
     """
-    with session() as conn:
-        trace = trace_finding(conn, DEFAULT_TENANT, finding_id)
+    principal, tenant = acting(request)
+    with session(tenant) as conn:
+        _project_gap = permit(
+            request,
+            principal,
+            Permission.READ_FINDINGS,
+            resource_type="finding",
+            resource_id=str(finding_id),
+        )
+        trace = trace_finding(conn, tenant, finding_id)
     if trace is None:
         raise HTTPException(status_code=404, detail="no such finding")
     # A finding whose evidence has vanished is not a 404 — it exists, and its
@@ -415,7 +795,7 @@ def finding_trace(finding_id: UUID) -> JSONResponse:
 
 
 @app.post("/api/findings/{finding_id}/verdict")
-def record_verdict(finding_id: UUID, payload: dict[str, str]) -> JSONResponse:
+def record_verdict(request: Request, finding_id: UUID, payload: dict[str, str]) -> JSONResponse:
     """Record a verdict, and export if it crosses the M-06 boundary.
 
     This is the only place a finding becomes a STIX bundle. Export is a
@@ -423,14 +803,27 @@ def record_verdict(finding_id: UUID, payload: dict[str, str]) -> JSONResponse:
     no measured precision (V-4) produces observations, and an observation
     handed to a recipient as though it were an assessment cannot be recalled.
     """
+    principal, tenant = acting(request)
     verdict = payload.get("verdict", "")
     if verdict not in VERDICTS:
         raise HTTPException(status_code=400, detail=f"verdict must be one of {VERDICTS}")
 
-    with session() as conn:
+    with session(tenant) as conn:
+        # Checked before the verdict is written, not after. A verdict at or
+        # above likely_coordination is what pushes a finding into someone
+        # else's threat intelligence (M-06), so this is the highest-consequence
+        # write in the system and the one whose authorization must not be
+        # decided by whether a later step happened to succeed.
+        permit(
+            request,
+            principal,
+            Permission.RECORD_VERDICT,
+            resource_type="finding",
+            resource_id=str(finding_id),
+        )
         PostgresReviewRepository(conn).record_verdict(
             uuid.uuid4(),
-            DEFAULT_TENANT,
+            tenant,
             finding_id,
             verdict,
             payload.get("analyst", "console"),
@@ -447,12 +840,12 @@ def record_verdict(finding_id: UUID, payload: dict[str, str]) -> JSONResponse:
             )
             return _json(response)
 
-        finding = PostgresDetectionRepository(conn).get_finding(DEFAULT_TENANT, finding_id)
+        finding = PostgresDetectionRepository(conn).get_finding(tenant, finding_id)
         if finding is None:
             raise HTTPException(status_code=404, detail="no such finding")
 
         outcome = ExportFinding(PostgresExportRepository(conn)).execute(
-            assemble(conn, DEFAULT_TENANT, finding, verdict),
+            assemble(conn, tenant, finding, verdict),
             str(finding.get("trace_id") or ""),
         )
 
@@ -466,34 +859,66 @@ def record_verdict(finding_id: UUID, payload: dict[str, str]) -> JSONResponse:
 
 
 @app.get("/api/rules")
-def rules() -> JSONResponse:
-    with session() as conn:
-        return _json(PostgresDetectionRepository(conn).list_rules(DEFAULT_TENANT))
+def rules(request: Request) -> JSONResponse:
+    principal, tenant = acting(request)
+    with session(tenant) as conn:
+        _project_gap = permit(
+            request,
+            principal,
+            Permission.READ_FINDINGS,
+            resource_type="rule",
+            resource_id="*",
+        )
+        return _json(PostgresDetectionRepository(conn).list_rules(tenant))
 
 
 @app.get("/api/exports")
-def exports() -> JSONResponse:
-    with session() as conn:
-        return _json(PostgresExportRepository(conn).list_exports(DEFAULT_TENANT))
+def exports(request: Request) -> JSONResponse:
+    principal, tenant = acting(request)
+    with session(tenant) as conn:
+        _project_gap = permit(
+            request,
+            principal,
+            Permission.EXPORT_STIX,
+            resource_type="export",
+            resource_id="*",
+        )
+        return _json(PostgresExportRepository(conn).list_exports(tenant))
 
 
 @app.get("/api/exports/{export_id}/bundle")
-def export_bundle(export_id: UUID) -> PlainTextResponse:
-    with session() as conn:
-        payload = PostgresExportRepository(conn).get_bundle(DEFAULT_TENANT, export_id)
+def export_bundle(request: Request, export_id: UUID) -> PlainTextResponse:
+    principal, tenant = acting(request)
+    with session(tenant) as conn:
+        _project_gap = permit(
+            request,
+            principal,
+            Permission.EXPORT_STIX,
+            resource_type="export",
+            resource_id=str(export_id),
+        )
+        payload = PostgresExportRepository(conn).get_bundle(tenant, export_id)
     if payload is None:
         raise HTTPException(status_code=404, detail="no such export")
     return PlainTextResponse(payload, media_type="application/json")
 
 
 @app.get("/api/timeline")
-def timeline() -> JSONResponse:
+def timeline(request: Request) -> JSONResponse:
     """Everything that happened, in one ordered stream.
 
     Captures, bundles, findings and exports on one axis so the pipeline is
     legible as a sequence rather than as four separate tables.
     """
-    with session() as conn, conn.cursor() as cur:
+    principal, tenant = acting(request)
+    with session(tenant) as conn, conn.cursor() as cur:
+        _project_gap = permit(
+            request,
+            principal,
+            Permission.READ_FINDINGS,
+            resource_type="timeline",
+            resource_id=str(tenant),
+        )
         cur.execute(
             "SELECT 'capture' AS kind, requested_at AS at, trace_id, "
             "       url AS label, status AS detail "
@@ -509,14 +934,14 @@ def timeline() -> JSONResponse:
             "SELECT 'export', created_at, trace_id, 'STIX 2.1', bundle_sha256 "
             "  FROM sch_export.export_jobs WHERE tenant_id = %(t)s "
             " ORDER BY at DESC LIMIT 200",
-            {"t": DEFAULT_TENANT},
+            {"t": tenant},
         )
         columns = ["kind", "at", "trace_id", "label", "detail"]
         return _json([dict(zip(columns, row, strict=True)) for row in cur.fetchall()])
 
 
 @app.get("/api/graph")
-def graph() -> JSONResponse:
+def graph(request: Request) -> JSONResponse:
     """Co-participation: accounts that appear in the same finding.
 
     Real data, not dummy — but a trivially small graph, because the naive rule
@@ -524,7 +949,15 @@ def graph() -> JSONResponse:
     same window", which is a statement about the cluster and about nobody in
     particular (V-1).
     """
-    with session() as conn, conn.cursor() as cur:
+    principal, tenant = acting(request)
+    with session(tenant) as conn, conn.cursor() as cur:
+        _project_gap = permit(
+            request,
+            principal,
+            Permission.READ_FINDINGS,
+            resource_type="graph",
+            resource_id=str(tenant),
+        )
         cur.execute(
             # Through the published view, not the table (D-92, D-99).
             "SELECT fa.finding_id, fa.account_id, a.handle "
@@ -532,7 +965,7 @@ def graph() -> JSONResponse:
             "  JOIN sch_extraction.v_accounts_for_export a "
             "    ON a.account_id = fa.account_id AND a.tenant_id = fa.tenant_id "
             " WHERE fa.tenant_id = %s",
-            (DEFAULT_TENANT,),
+            (tenant,),
         )
         rows = cur.fetchall()
 
@@ -610,7 +1043,7 @@ def _scheduler_check(last: dict[str, Any] | None) -> dict[str, Any]:
 
 
 @app.get("/api/health")
-def health() -> JSONResponse:
+def health(request: Request) -> JSONResponse:
     """System health. Reports what is not working as loudly as what is.
 
     Every dependency is probed rather than assumed, because silent degradation
@@ -619,7 +1052,7 @@ def health() -> JSONResponse:
     checks: list[dict[str, Any]] = []
 
     try:
-        with session() as conn, conn.cursor() as cur:
+        with owner_connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM sch_migrations.applied")
             applied = (cur.fetchone() or (0,))[0]
         checks.append(
@@ -667,102 +1100,6 @@ def health() -> JSONResponse:
                 ),
             }
         )
-    try:
-        with session() as conn:
-            repository = PostgresEvidenceRepository(conn)
-            latest = repository.latest_anchor(DEFAULT_TENANT)
-            head = repository.head(DEFAULT_TENANT)
-        if head is None:
-            checks.append(
-                {
-                    "name": "chain_anchoring",
-                    "status": "ok",
-                    "detail": "The chain is empty — nothing to anchor yet.",
-                }
-            )
-        elif latest is None:
-            checks.append(
-                {
-                    "name": "chain_anchoring",
-                    "status": "unverified",
-                    "detail": (
-                        f"Chain head is at index {head.chain_index} and has never been "
-                        "anchored. A hash chain detects an edited record but not a chain "
-                        "rebuilt from genesis; until an anchor exists, wholesale "
-                        "replacement is undetectable."
-                    ),
-                }
-            )
-        else:
-            behind = head.chain_index - latest.chain_index
-            checks.append(
-                {
-                    "name": "chain_anchoring",
-                    "status": "ok" if behind == 0 else "stale",
-                    "detail": (
-                        f"Anchored at index {latest.chain_index} via {latest.authority_url}. "
-                        + (
-                            "Head is anchored."
-                            if behind == 0
-                            else f"{behind} entrie(s) written since — those remain rewritable "
-                            "until the next anchor."
-                        )
-                    ),
-                }
-            )
-    except Exception as exc:
-        checks.append({"name": "chain_anchoring", "status": "failed", "detail": str(exc)})
-
-    # V-5, checked rather than assumed.
-    #
-    # The CHECK constraint on findings enforces that evidence_refs is non-empty.
-    # It cannot enforce that the referenced bundles exist, because the obvious
-    # mechanism — a foreign key from sch_detection to sch_evidence — would
-    # couple two modules that D-99 requires to be independently removable. So
-    # the reference is verified rather than constrained, and the verification
-    # has to be visible or it is not a control at all.
-    #
-    # A non-zero count here means findings resting on evidence nobody can
-    # produce, which is precisely the condition V-5 exists to prevent.
-    try:
-        with session() as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM sch_detection.findings f "
-                " WHERE f.tenant_id = %(t)s AND EXISTS ("
-                "   SELECT 1 FROM unnest(f.evidence_refs) r "
-                "    WHERE NOT EXISTS ("
-                "      SELECT 1 FROM sch_evidence.evidence_bundles b "
-                "       WHERE b.tenant_id = f.tenant_id AND b.bundle_id = r))",
-                {"t": DEFAULT_TENANT},
-            )
-            dangling = (cur.fetchone() or (0,))[0]
-        checks.append(
-            {
-                "name": "evidence_references",
-                "status": "ok" if dangling == 0 else "failed",
-                "detail": (
-                    "Every finding's evidence resolves to a stored bundle."
-                    if dangling == 0
-                    else f"{dangling} finding(s) reference evidence bundles that cannot "
-                    "be found. V-5 requires a finding to rest on evidence; these rest "
-                    "on identifiers that resolve to nothing and cannot be defended."
-                ),
-            }
-        )
-    except Exception as exc:
-        checks.append({"name": "evidence_references", "status": "failed", "detail": str(exc)})
-
-    # D-87 — a scheduler that stopped is the purest form of silent degradation:
-    # nothing complains, because nothing is running. The absence of runs is the
-    # signal, so it has to be checked for explicitly rather than inferred from
-    # an empty screen (D-68).
-    try:
-        with session() as conn:
-            last = PostgresCollectionRepository(conn).last_run(DEFAULT_TENANT)
-        checks.append(_scheduler_check(last))
-    except Exception as exc:
-        checks.append({"name": "scheduler", "status": "failed", "detail": str(exc)})
-
     queue_url = os.environ.get("ASIP_FETCH_QUEUE_URL")
     if not queue_url:
         checks.append(
@@ -827,6 +1164,134 @@ if CANARY_ROOT.is_dir():
 
 if (WEB_ROOT / "console").is_dir():
     app.mount("/static", StaticFiles(directory=WEB_ROOT / "console"), name="static")
+
+
+@app.get("/api/health/tenant")
+def tenant_health(request: Request) -> JSONResponse:
+    """Health of this tenant's own data. Behind authentication, unlike /api/health.
+
+    These three read tenant rows — how far the chain has been anchored, whether
+    any finding points at evidence that no longer resolves (V-5), whether the
+    scheduler is still running. Useful, and none of anyone else's business:
+    "how many broken findings does this customer have" is not a liveness probe.
+
+    The split is the point. /api/health answers "is the service up" for a load
+    balancer and needs no session; this answers "is this tenant's data sound"
+    and needs one.
+    """
+    principal, tenant = acting(request)
+
+    # Authorized once, up front, and deliberately outside the try blocks below.
+    # Each check catches its own exceptions so one broken dependency does not
+    # hide the rest — but a denial must not be swallowed by that same handler
+    # and reported as "check failed".
+    with session(tenant) as conn:
+        permit_admin(
+            principal,
+            Permission.MANAGE_PROJECTS,
+            resource_type="tenant_health",
+            resource_id=str(tenant),
+        )
+
+    checks: list[dict[str, Any]] = []
+
+    try:
+        with session(tenant) as conn:
+            repository = PostgresEvidenceRepository(conn)
+            latest = repository.latest_anchor(tenant)
+            head = repository.head(tenant)
+        if head is None:
+            checks.append(
+                {
+                    "name": "chain_anchoring",
+                    "status": "ok",
+                    "detail": "The chain is empty — nothing to anchor yet.",
+                }
+            )
+        elif latest is None:
+            checks.append(
+                {
+                    "name": "chain_anchoring",
+                    "status": "unverified",
+                    "detail": (
+                        f"Chain head is at index {head.chain_index} and has never been "
+                        "anchored. A hash chain detects an edited record but not a chain "
+                        "rebuilt from genesis; until an anchor exists, wholesale "
+                        "replacement is undetectable."
+                    ),
+                }
+            )
+        else:
+            behind = head.chain_index - latest.chain_index
+            checks.append(
+                {
+                    "name": "chain_anchoring",
+                    "status": "ok" if behind == 0 else "stale",
+                    "detail": (
+                        f"Anchored at index {latest.chain_index} via {latest.authority_url}. "
+                        + (
+                            "Head is anchored."
+                            if behind == 0
+                            else f"{behind} entrie(s) written since — those remain rewritable "
+                            "until the next anchor."
+                        )
+                    ),
+                }
+            )
+    except Exception as exc:
+        checks.append({"name": "chain_anchoring", "status": "failed", "detail": str(exc)})
+
+    # V-5, checked rather than assumed.
+    #
+    # The CHECK constraint on findings enforces that evidence_refs is non-empty.
+    # It cannot enforce that the referenced bundles exist, because the obvious
+    # mechanism — a foreign key from sch_detection to sch_evidence — would
+    # couple two modules that D-99 requires to be independently removable. So
+    # the reference is verified rather than constrained, and the verification
+    # has to be visible or it is not a control at all.
+    #
+    # A non-zero count here means findings resting on evidence nobody can
+    # produce, which is precisely the condition V-5 exists to prevent.
+    try:
+        with session(tenant) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM sch_detection.findings f "
+                " WHERE f.tenant_id = %(t)s AND EXISTS ("
+                "   SELECT 1 FROM unnest(f.evidence_refs) r "
+                "    WHERE NOT EXISTS ("
+                "      SELECT 1 FROM sch_evidence.evidence_bundles b "
+                "       WHERE b.tenant_id = f.tenant_id AND b.bundle_id = r))",
+                {"t": tenant},
+            )
+            dangling = (cur.fetchone() or (0,))[0]
+        checks.append(
+            {
+                "name": "evidence_references",
+                "status": "ok" if dangling == 0 else "failed",
+                "detail": (
+                    "Every finding's evidence resolves to a stored bundle."
+                    if dangling == 0
+                    else f"{dangling} finding(s) reference evidence bundles that cannot "
+                    "be found. V-5 requires a finding to rest on evidence; these rest "
+                    "on identifiers that resolve to nothing and cannot be defended."
+                ),
+            }
+        )
+    except Exception as exc:
+        checks.append({"name": "evidence_references", "status": "failed", "detail": str(exc)})
+
+    # D-87 — a scheduler that stopped is the purest form of silent degradation:
+    # nothing complains, because nothing is running. The absence of runs is the
+    # signal, so it has to be checked for explicitly rather than inferred from
+    # an empty screen (D-68).
+    try:
+        with session(tenant) as conn:
+            last = PostgresCollectionRepository(conn).last_run(tenant)
+        checks.append(_scheduler_check(last))
+    except Exception as exc:
+        checks.append({"name": "scheduler", "status": "failed", "detail": str(exc)})
+
+    return _json({"checks": checks, "generated_at": datetime.now(UTC)})
 
 
 @app.get("/", response_class=HTMLResponse)

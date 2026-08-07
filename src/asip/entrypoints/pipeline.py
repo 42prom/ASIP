@@ -303,6 +303,9 @@ class Pipeline:
                 tenant_id=self._tenant,
                 rule_id=BURST_RULE_ID,
                 source_id=source_id,
+                # D-49. Inherited from the source rather than decided here: a
+                # rule has no idea what a project is, and it should not learn.
+                project_id=source["project_id"],
                 trace_id=trace_id,
                 window_start=cluster.window_start,
                 window_end=cluster.window_end,
