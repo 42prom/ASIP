@@ -156,29 +156,130 @@ const jobsTable = (jobs) =>
       el("td", { class: "hash" }, j.trace_id),
       el("td", {}, j.failure_reason || (j.capture_id ? shortHash(j.capture_id) : "—"))));
 
+/* What each support level means on screen. Symbol plus label, never colour
+   alone (D-62) — and the wording is about consequence, not implementation.
+   Nobody adding a page cares that there is no extractor; they care whether
+   this will ever tell them anything. */
+const SUPPORT_LABEL = {
+  extracts: "◆ fully read",
+  capture_only: "· evidence only",
+  blocked: "✕ cannot reach",
+  unknown: "? unrecognised",
+};
+
 screens.sources = {
   title: "Sources",
-  note: "What is monitored, how often, and when each was last read successfully.",
+  note: "What is monitored, how often, and when each was last read successfully. Adding a page here is what starts collection.",
   async render(root) {
-    const rows = await api("/api/sources");
+    const data = await api("/api/sources");
+    const rows = data.sources || [];
+
+    root.append(sourceForm(data.platforms || []));
+
+    root.append(el("h2", {}, "Monitored"));
     if (!rows.length) {
       root.append(emptyState("notready", "No sources configured",
-        "Run `make seed-dev` to register the canary source."));
+        "Nothing is being collected. Add one above, or run `make seed-dev` for the canary."));
       return;
     }
+
     root.append(table(
-      ["Name", "URL", "Platform", "Every", "Enabled", "Canary", "Last success", "Failures"],
+      ["Name", "URL", "Platform", "Reads", "Every", "Enabled", "Last success", "Fails"],
       rows, (s) => el("tr", { "data-row": "1" },
         el("td", {}, s.name),
         el("td", {}, el("a", { href: s.url, target: "_blank", rel: "noreferrer" }, s.url)),
         el("td", {}, s.platform),
+        el("td", {}, el("span", { class: `support support-${s.support}`, title: s.support_note },
+          SUPPORT_LABEL[s.support] || s.support)),
         el("td", { class: "num" }, `${s.interval_seconds}s`),
-        el("td", {}, s.enabled ? "yes" : "no"),
-        el("td", {}, s.is_canary ? "yes" : "—"),
+        el("td", {}, el("button", {
+          class: "link",
+          onclick: async () => {
+            await api(`/api/sources/${s.source_id}/enabled`, {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ enabled: !s.enabled }),
+            });
+            go("sources");
+          },
+        }, s.enabled ? "on — pause" : "off — resume")),
         el("td", { class: "timestamp" }, ts(s.last_success_at)),
         el("td", { class: "num" }, s.consecutive_failures))));
+
+    // Anything that will never produce a finding says so here too, not only in
+    // a tooltip. A source quietly collecting nothing is how an empty Findings
+    // screen gets misread as "no coordinated activity" (D-68).
+    const mute = rows.filter((s) => s.support !== "extracts");
+    if (mute.length) {
+      root.append(el("p", { class: "screen-note held" },
+        `${mute.length} of ${rows.length} source(s) will not produce findings. ` +
+        `They are captured and sealed as evidence, and nothing is extracted from them. ` +
+        `An empty Findings screen for these means "not read", not "nothing happening".`));
+    }
   },
 };
+
+function sourceForm(platforms) {
+  const name = el("input", { type: "text", id: "src-name", placeholder: "Ministry press page" });
+  const url = el("input", { type: "url", id: "src-url", placeholder: "https://…" });
+  const interval = el("input", { type: "number", id: "src-interval", value: "3600", min: "60" });
+  const select = el("select", { id: "src-platform" },
+    ...platforms.map((p) => el("option", { value: p.key }, p.label)));
+
+  const explain = el("p", { class: "screen-note" });
+  const result = el("p", { class: "screen-note" });
+
+  // The explanation updates as the platform changes, BEFORE anything is
+  // submitted. Telling someone after they added a Facebook page that it cannot
+  // be read is worse than not telling them: they have already formed the
+  // expectation this screen exists to set.
+  const describe = () => {
+    const chosen = platforms.find((p) => p.key === select.value);
+    if (!chosen) return;
+    explain.textContent = chosen.note;
+    explain.className = chosen.support === "extracts" ? "screen-note ok" : "screen-note held";
+  };
+  select.addEventListener("change", describe);
+
+  const submit = async (event) => {
+    event.preventDefault();
+    result.textContent = "";
+    try {
+      const response = await api("/api/sources", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: name.value,
+          url: url.value,
+          platform: select.value,
+          interval_seconds: Number(interval.value),
+        }),
+      });
+      result.className = response.warning ? "screen-note held" : "screen-note ok";
+      result.textContent = response.warning
+        ? `Added — but ${response.warning}`
+        : "Added. It will be collected on the next scheduler tick.";
+      name.value = "";
+      url.value = "";
+      setTimeout(() => go("sources"), 1200);
+    } catch (error) {
+      result.className = "screen-note held";
+      result.textContent = error.message;
+    }
+  };
+
+  const form = el("form", { class: "source-form", onsubmit: submit },
+    el("label", { for: "src-name" }, "Name"), name,
+    el("label", { for: "src-url" }, "URL"), url,
+    el("label", { for: "src-platform" }, "Platform"), select,
+    el("label", { for: "src-interval" }, "Check every (seconds)"), interval,
+    el("button", { type: "submit" }, "Add source"));
+
+  const wrap = el("div", {},
+    el("h2", {}, "Add a source"),
+    form, explain, result);
+  describe();
+  return wrap;
+}
 
 screens.captures = {
   title: "Captures",

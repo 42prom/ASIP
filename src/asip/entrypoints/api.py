@@ -46,6 +46,7 @@ from asip.modules.evidence.adapters.postgres_repository import PostgresEvidenceR
 from asip.modules.export.adapters.postgres_repository import PostgresExportRepository
 from asip.modules.export.application.export_finding import ExportFinding, crosses_the_boundary
 from asip.modules.extraction.adapters.postgres_repository import PostgresExtractionRepository
+from asip.modules.extraction.domain.platforms import PLATFORMS, Support, is_known, platform
 from asip.modules.identity.adapters.postgres_repository import PostgresIdentityRepository
 from asip.modules.identity.application.authenticate import AuthenticationFailed
 from asip.modules.identity.application.guard import NotPermitted
@@ -557,7 +558,134 @@ def sources(request: Request) -> JSONResponse:
             resource_type="source",
             resource_id=str(tenant),
         )
-        return _json(PostgresCollectionRepository(conn).list_sources(tenant))
+        rows = PostgresCollectionRepository(conn).list_sources(tenant)
+
+    # Each row carries what this system can actually do with it, so a source
+    # that will never produce a finding says so on the screen where it is
+    # listed rather than only where it was added (D-68).
+    for row in rows:
+        entry = platform(str(row.get("platform", "")))
+        row["support"] = entry.support.value if entry else "unknown"
+        row["support_note"] = (
+            entry.note
+            if entry
+            else (
+                f"Unrecognised platform {row.get('platform')!r}. It will be fetched and "
+                "sealed as evidence; nothing will be extracted."
+            )
+        )
+    return _json({"sources": rows, "platforms": _platform_catalogue()})
+
+
+def _platform_catalogue() -> list[dict[str, str]]:
+    """What the add-source form offers, and what each choice really means."""
+    return [
+        {"key": p.key, "label": p.label, "support": p.support.value, "note": p.note}
+        for p in PLATFORMS
+    ]
+
+
+@app.post("/api/sources")
+def add_source(request: Request, payload: dict[str, Any]) -> JSONResponse:
+    """Add or update a monitored source.
+
+    Deliberately does NOT refuse a platform this system cannot parse. A capture
+    of a page nobody can read yet is still a sealed, timestamped record of what
+    that page said at that moment, and reprocessing (D-13) exists so a later
+    extractor can read captures taken before it was written. Refusing would
+    throw away evidence that cannot be recreated — by the time an extractor
+    lands, the page has changed.
+
+    What it does instead is answer honestly, in the response, about what will
+    happen. The caller gets `support` and `warning` and the console shows them.
+    """
+    principal, tenant = acting(request)
+
+    url = str(payload.get("url", "")).strip()
+    name = str(payload.get("name", "")).strip()
+    platform_key = str(payload.get("platform", "")).strip().lower()
+
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="url must start with http:// or https://")
+    if not is_known(platform_key):
+        known = ", ".join(p.key for p in PLATFORMS)
+        raise HTTPException(status_code=400, detail=f"platform must be one of: {known}")
+
+    try:
+        interval = int(payload.get("interval_seconds", 3600))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="interval_seconds must be a number") from None
+    if interval < 60:
+        # Mirrors the CHECK constraint, so the message explains rather than
+        # surfacing a constraint name. Not politeness: a fetch loop tighter than
+        # a minute is how a source starts refusing us (V-6).
+        raise HTTPException(
+            status_code=400,
+            detail="interval_seconds must be at least 60. Fetching more often than "
+            "once a minute is neither useful nor polite to the source.",
+        )
+
+    entry = platform(platform_key)
+    assert entry is not None
+
+    source_id = UUID(str(payload["source_id"])) if payload.get("source_id") else uuid.uuid4()
+    project_id = scope_of(request, principal)
+
+    with session(tenant) as conn:
+        permit_admin(
+            principal,
+            Permission.MANAGE_PROJECTS,
+            resource_type="source",
+            resource_id=str(source_id),
+        )
+        PostgresCollectionRepository(conn).add_source(
+            source_id=source_id,
+            tenant_id=tenant,
+            project_id=project_id,
+            name=name,
+            url=url,
+            platform=platform_key,
+            priority=int(payload.get("priority", 5)),
+            is_canary=bool(payload.get("is_canary", False)),
+            interval_seconds=interval,
+        )
+
+    return _json(
+        {
+            "ok": True,
+            "source_id": source_id,
+            "project_id": project_id,
+            "support": entry.support.value,
+            "warning": None if entry.support is Support.EXTRACTS else entry.note,
+        }
+    )
+
+
+@app.post("/api/sources/{source_id}/enabled")
+def set_source_enabled(request: Request, source_id: UUID, payload: dict[str, bool]) -> JSONResponse:
+    """The kill switch at source level (D-111).
+
+    Separate from deleting the source. Stopping collection must never mean
+    losing the record of what was already collected, and an operator reaching
+    for "stop" under pressure should not have to think about that distinction.
+    """
+    principal, tenant = acting(request)
+    enabled = payload.get("enabled", True) is True
+
+    with session(tenant) as conn:
+        permit_admin(
+            principal,
+            Permission.MANAGE_PROJECTS,
+            resource_type="source",
+            resource_id=str(source_id),
+        )
+        changed = PostgresCollectionRepository(conn).set_enabled(tenant, source_id, enabled)
+
+    if not changed:
+        raise HTTPException(status_code=404, detail="no such source")
+    return _json({"ok": True, "source_id": source_id, "enabled": enabled})
 
 
 @app.get("/api/captures")

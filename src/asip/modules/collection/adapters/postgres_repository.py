@@ -65,6 +65,21 @@ class PostgresCollectionRepository:
                 (source_id, tenant_id),
             )
 
+    def set_enabled(self, tenant_id: UUID, source_id: UUID, enabled: bool) -> bool:
+        """The kill switch (D-111). Returns False if there is no such source.
+
+        Distinct from deleting: stopping collection must never mean losing what
+        was already collected. An operator reaching for "stop" during an
+        incident should not have to think about that difference.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE sch_collection.sources SET enabled = %s "
+                " WHERE tenant_id = %s AND source_id = %s",
+                (enabled, tenant_id, source_id),
+            )
+            return cur.rowcount > 0
+
     def list_sources(self, tenant_id: UUID) -> list[dict[str, Any]]:
         """Read through the published view, not the tables (D-92)."""
         with self._conn.cursor() as cur:

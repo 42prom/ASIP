@@ -223,6 +223,36 @@ td { overflow-wrap: anywhere; }
 .verdict-insufficient_evidence::before  { content: "··"; }
 .verdict-no_coordination::before        { content: "—"; }
 
+/* Adding a source. Two columns so the labels read as a form rather than a
+   stack of unrelated boxes. */
+.source-form {
+  display: grid; grid-template-columns: max-content minmax(0, 32ch);
+  gap: var(--space-2) var(--space-3); align-items: center;
+  margin: var(--space-3) 0;
+}
+.source-form label {
+  font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--slate);
+}
+.source-form input, .source-form select {
+  font-family: var(--font-data); font-size: var(--text-sm);
+  padding: var(--space-2); border: var(--border); border-radius: var(--radius);
+  background: var(--paper); color: var(--ink); width: 100%;
+}
+.source-form input:focus, .source-form select:focus {
+  outline: 2px solid var(--signal); outline-offset: 1px;
+}
+.source-form button { grid-column: 2; justify-self: start; padding: var(--space-2) var(--space-4); }
+
+/* What this system can do with a source. `capture_only` is not an error state —
+   sealed evidence is worth having — so it reads as neutral, not as a warning.
+   `blocked` is the one that must not be mistaken for "working but quiet". */
+.support { font-family: var(--font-data); font-size: var(--text-xs); white-space: nowrap; }
+.support-extracts     { color: var(--status-ok); }
+.support-capture_only { color: var(--slate); }
+.support-blocked      { color: var(--status-stale); }
+.support-unknown      { color: var(--status-unknown); }
+
 /* Sign-in. Deliberately plain: it is the one screen that must work when
    everything else is refusing, so it depends on nothing. */
 .login {
