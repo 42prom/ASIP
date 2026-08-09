@@ -174,8 +174,23 @@ screens.sources = {
     const data = await api("/api/sources");
     const rows = data.sources || [];
 
-    root.append(bulkForm(data.platforms || []));
-    root.append(sourceForm(data.platforms || []));
+    // Adding a source is an administrative act (MANAGE_PROJECTS), and it is
+    // the tenant_admin's, not the analyst's — a source's project decides who
+    // can see its findings, so adding one is a permissions change wearing a
+    // different hat (D-49).
+    //
+    // Hidden rather than shown-and-refused: an analyst who fills in a form and
+    // is then told no has been wasted, and the audit log gains a denial that
+    // records our interface being wrong rather than them being. The API still
+    // enforces it — this only stops the pointless attempt.
+    if (canManageSources()) {
+      root.append(bulkForm(data.platforms || []));
+      root.append(sourceForm(data.platforms || []));
+    } else {
+      root.append(el("p", { class: "screen-note" },
+        "Adding or pausing a source is a tenant administrator's action. You are signed in " +
+        "as " + (me ? me.roles.join(" · ") : "an analyst") + "."));
+    }
 
     root.append(el("h2", {}, "Monitored"));
     if (!rows.length) {
@@ -194,16 +209,18 @@ screens.sources = {
           SUPPORT_LABEL[s.support] || s.support)),
         el("td", {}, baselineCell(s)),
         el("td", { class: "num" }, `${s.interval_seconds}s`),
-        el("td", {}, el("button", {
-          class: "link",
-          onclick: async () => {
-            await api(`/api/sources/${s.source_id}/enabled`, {
-              method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ enabled: !s.enabled }),
-            });
-            go("sources");
-          },
-        }, s.enabled ? "on — pause" : "off — resume")),
+        el("td", {}, canManageSources()
+          ? el("button", {
+              class: "link",
+              onclick: async () => {
+                await api(`/api/sources/${s.source_id}/enabled`, {
+                  method: "POST", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ enabled: !s.enabled }),
+                });
+                go("sources");
+              },
+            }, s.enabled ? "on — pause" : "off — resume")
+          : (s.enabled ? "on" : "off")),
         el("td", { class: "timestamp" }, ts(s.last_success_at)),
         el("td", { class: "num" }, s.consecutive_failures))));
 
@@ -239,6 +256,10 @@ screens.sources = {
    coordinated activity" is the D-68 failure at its most expensive: sustained,
    confident, and wrong. */
 const BASELINE_DAYS = 30;
+
+/* A courtesy, never the enforcement. The API checks for itself and a console
+   bug that showed the form would still get a 403. */
+const canManageSources = () => Boolean(me?.permissions?.includes("manage_projects"));
 
 function baselineCell(source) {
   const days = source.observed_days ?? 0;
