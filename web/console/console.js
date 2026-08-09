@@ -163,6 +163,7 @@ const jobsTable = (jobs) =>
 const SUPPORT_LABEL = {
   extracts: "◆ fully read",
   capture_only: "· evidence only",
+  needs_route: "◇ awaiting route",
   blocked: "✕ cannot reach",
   unknown: "? unrecognised",
 };
@@ -281,10 +282,24 @@ function bulkForm(platforms) {
     id: "bulk-list", rows: "6",
     placeholder: "one per line — channel name, @name, or t.me link\n\ncivilgeorgia\n@some_channel\nhttps://t.me/another",
   });
+  const offered = platforms.filter(
+    (p) => p.support === "extracts" || p.support === "needs_route");
   const select = el("select", { id: "bulk-platform" },
-    ...platforms.filter((p) => p.support === "extracts")
-      .map((p) => el("option", { value: p.key }, p.label)));
+    ...offered.map((p) => el("option", { value: p.key }, p.label)));
   const result = el("p", { class: "screen-note" });
+  const explain = el("p", { class: "screen-note" });
+
+  // What this platform will actually do, before anything is submitted. A
+  // Facebook page added today is stored and scheduled and collects nothing
+  // until a provider exists — saying so after the fact is worse than not
+  // saying it, because the expectation has already formed.
+  const describe = () => {
+    const chosen = offered.find((p) => p.key === select.value);
+    if (!chosen) return;
+    explain.textContent = chosen.note;
+    explain.className = chosen.support === "extracts" ? "screen-note ok" : "screen-note held";
+  };
+  select.addEventListener("change", describe);
 
   const submit = async (event) => {
     event.preventDefault();
@@ -310,18 +325,22 @@ function bulkForm(platforms) {
     }
   };
 
-  return el("div", {},
+  const wrap = el("div", {},
     el("h2", {}, "Start watching a list"),
     el("p", { class: "screen-note" },
-      "Paste the channels you want monitored. Collection has a thirty-day lead time and " +
-      "nothing else does — every day not collecting is a day added to the earliest " +
-      "possible answer, so start with the ones you are sure about and add more later. " +
-      "Re-pasting the same list is safe: it will not restart anyone's clock."),
+      "Paste what you want monitored — one per line. Collection has a thirty-day lead " +
+      "time and nothing else does, so start with the ones you are sure about and add " +
+      "more later. Re-pasting the same list is safe: it will not restart anyone's clock. " +
+      "A platform still waiting on an access route can be added now — the pages are " +
+      "stored and scheduled, and collection begins the moment the route exists."),
     el("form", { class: "source-form bulk", onsubmit: submit },
       el("label", { for: "bulk-platform" }, "Platform"), select,
-      el("label", { for: "bulk-list" }, "Channels"), box,
+      el("label", { for: "bulk-list" }, "Pages / channels"), box,
       el("button", { type: "submit" }, "Start watching")),
+    explain,
     result);
+  describe();
+  return wrap;
 }
 
 function sourceForm(platforms) {

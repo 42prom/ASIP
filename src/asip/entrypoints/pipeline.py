@@ -130,6 +130,7 @@ class Pipeline:
         # The fetcher is handed no connection, ever. See http_fetcher.py: V-3
         # is enforced by what this object was constructed with.
         self._fetcher = fetcher
+        self._acquirers: dict[str, Any] = {}
         self._tenant = tenant_id
 
         self._collection = PostgresCollectionRepository(connection)
@@ -190,6 +191,24 @@ class Pipeline:
 
         return run
 
+    def _acquirer_for(self, platform: str) -> Any:
+        """The acquirer for one platform, built once per pipeline.
+
+        The fetcher handed in at construction stays the default, so a caller
+        that injected a fake — the fetch-zone isolation tests do exactly this —
+        keeps getting it. Only platforms that genuinely cannot be fetched over
+        HTTP get something else, and that decision lives in the composition
+        root rather than here (D-98).
+        """
+        if platform not in self._acquirers:
+            if platform == "facebook":
+                from asip.entrypoints.composition import Settings, build_acquirer
+
+                self._acquirers[platform] = build_acquirer(Settings.for_development(), platform)
+            else:
+                self._acquirers[platform] = self._fetcher
+        return self._acquirers[platform]
+
     def _run_source(
         self, run: PipelineRun, source: dict[str, Any], trace_id: str
     ) -> tuple[UUID, UUID] | None:
@@ -200,8 +219,11 @@ class Pipeline:
         self._collection.open_job(job_id, self._tenant, source_id, trace_id, started)
         self._conn.commit()
 
-        # ── fetch ───────────────────────────────────────────────────────────
-        outcome = self._fetcher.fetch(source["url"])
+        # ── acquire ─────────────────────────────────────────────────────────
+        # Per platform: a public page over HTTP, Facebook through whichever
+        # authenticated provider is configured. Same outcome shape either way,
+        # so every stage after this is identical.
+        outcome = self._acquirer_for(source["platform"]).fetch(source["url"])
         finished = datetime.now(UTC)
 
         if not outcome.succeeded:

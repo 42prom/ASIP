@@ -43,17 +43,60 @@ def test_an_unknown_platform_is_not_silently_accepted() -> None:
     assert not extracts("myspace")
 
 
-def test_blocked_platforms_say_why_and_name_the_open_item() -> None:
+def test_unreachable_platforms_say_why_and_name_the_open_item() -> None:
     """A user told only "not supported" assumes it is coming next sprint.
 
     Naming O-03 says what it actually is: an undecided commercial route, not a
     missing feature someone forgot to build.
-    """
-    blocked = [p for p in PLATFORMS if p.support is Support.BLOCKED]
-    assert blocked, "the registry claims everything works, which cannot be true"
 
-    for entry in blocked:
-        assert "O-03" in entry.note, f"{entry.key} does not say why it is blocked"
+    Written over BOTH unreachable states. When Facebook moved from BLOCKED to
+    NEEDS_ROUTE this test kept passing while silently no longer covering it —
+    a state added to the enum must not be able to escape the check by being
+    new.
+    """
+    unreachable = [p for p in PLATFORMS if p.support in (Support.BLOCKED, Support.NEEDS_ROUTE)]
+    assert unreachable, "the registry claims everything works, which cannot be true"
+
+    for entry in unreachable:
+        assert "O-03" in entry.note, f"{entry.key} does not say why it cannot be reached"
+
+
+def test_every_support_state_is_covered_by_a_test() -> None:
+    """The guard against the gap the previous test just had.
+
+    Every value of Support must appear in this module's expectations, so
+    adding a state forces a decision about what it promises rather than
+    quietly inheriting no checks at all.
+    """
+    checked = {
+        Support.EXTRACTS,
+        Support.CAPTURE_ONLY,
+        Support.BLOCKED,
+        Support.NEEDS_ROUTE,
+    }
+    assert set(Support) == checked, (
+        f"Support has states this module does not reason about: {set(Support) - checked}"
+    )
+
+
+def test_a_platform_awaiting_a_route_says_it_can_be_added_now() -> None:
+    """NEEDS_ROUTE exists to be distinguishable from BLOCKED.
+
+    BLOCKED means nothing is built. NEEDS_ROUTE means the pages can be added
+    and scheduled today and collection starts when a credential arrives. An
+    operator told "blocked" would go and build something that already exists.
+    """
+    waiting = [p for p in PLATFORMS if p.support is Support.NEEDS_ROUTE]
+    assert waiting, "no platform is in the awaiting-route state"
+
+    for entry in waiting:
+        lowered = entry.note.lower()
+        assert "add the pages now" in lowered or "can be added" in lowered, (
+            f"{entry.key} does not tell the user they can start today"
+        )
+        assert "asip_facebook_provider" in lowered or "provider" in lowered, (
+            f"{entry.key} does not say what would unblock it"
+        )
 
 
 def test_no_blocked_platform_promises_a_workaround() -> None:

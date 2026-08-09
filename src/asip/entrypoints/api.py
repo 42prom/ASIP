@@ -40,6 +40,7 @@ from asip.entrypoints.composition import Settings, build_evidence, build_fetcher
 from asip.entrypoints.exporting import assemble
 from asip.entrypoints.pipeline import BURST_RULE_NAME, Pipeline
 from asip.entrypoints.provenance import trace_finding
+from asip.modules.collection.adapters.facebook_acquisition import page_handle_from
 from asip.modules.collection.adapters.postgres_repository import PostgresCollectionRepository
 from asip.modules.detection.adapters.postgres_repository import PostgresDetectionRepository
 from asip.modules.evidence.adapters.postgres_repository import PostgresEvidenceRepository
@@ -808,6 +809,24 @@ def _as_source(line: str, platform_key: str) -> tuple[str, str]:
         if not handle or not all(c.isalnum() or c == "_" for c in handle):
             raise ValueError(f"not a Telegram channel name: {line!r}")
         return (f"t.me/{handle}", f"https://t.me/s/{handle}")
+
+    if platform_key == "facebook":
+        # Canonicalised through the acquisition adapter's own parser rather
+        # than a copy of it. Two reasons, and the second is the important one:
+        #
+        #   * m.facebook.com/x, www.facebook.com/x and @x are the same page,
+        #     and storing them as three sources would defeat the uniqueness
+        #     constraint, triple the cost, and give one page three baseline
+        #     clocks.
+        #   * the adapter resolves a URL to a handle when it collects. If this
+        #     normalised differently, a source would be stored under one
+        #     identity and collected under another.
+        handle = page_handle_from(value)
+        # Page names are letters, digits, dots and hyphens. Numeric profile ids
+        # are also valid, which is why digits alone are allowed.
+        if not handle or not all(c.isalnum() or c in ".-_" for c in handle):
+            raise ValueError(f"not a Facebook page name: {line!r}")
+        return (f"facebook.com/{handle}", f"https://www.facebook.com/{handle}")
 
     if not value.startswith(("http://", "https://")):
         raise ValueError("url must start with http:// or https://")

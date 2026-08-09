@@ -163,6 +163,26 @@ def build_evidence(settings: Settings, connection: psycopg.Connection) -> Eviden
     )
 
 
+def build_acquirer(settings: Settings, platform: str) -> Any:
+    """The thing that turns one source into bytes, chosen by platform.
+
+    A public web page is fetched over HTTP. Facebook cannot be — an anonymous
+    GET returns a login wall and going around one is V-6 — so it goes through
+    an authenticated provider instead. Both produce the same outcome shape, so
+    everything downstream (seal, extract, detect, export) is identical and a
+    source can move between them without the pipeline noticing.
+
+    Chosen per source rather than configured once, because a tenant will
+    legitimately watch Telegram over HTTP and Facebook over an API in the same
+    project, in the same sweep.
+    """
+    if platform == "facebook":
+        from asip.modules.collection.adapters.facebook_acquisition import FacebookAcquisition
+
+        return FacebookAcquisition()
+    return build_fetcher(settings)
+
+
 def build_fetcher(settings: Settings) -> Any:
     """Pick the fetch adapter. Callers never learn which they got.
 

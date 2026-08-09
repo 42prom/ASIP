@@ -44,6 +44,14 @@ class Support(StrEnum):
     #: what gets sealed is a screenshot of a door, not of the room.
     BLOCKED = "blocked"
 
+    #: The plumbing exists and the credential does not. Distinct from BLOCKED
+    #: on purpose: BLOCKED means nobody has built anything, NEEDS_ROUTE means
+    #: pages can be added and scheduled today and collection begins the moment
+    #: a provider is configured. Telling an operator "blocked" when the only
+    #: missing piece is an environment variable sends them to build something
+    #: that already exists.
+    NEEDS_ROUTE = "needs_route"
+
 
 @dataclass(frozen=True, slots=True)
 class Platform:
@@ -82,16 +90,20 @@ PLATFORMS: tuple[Platform, ...] = (
     ),
     Platform(
         key="facebook",
-        label="Facebook",
-        support=Support.BLOCKED,
+        label="Facebook — page",
+        support=Support.NEEDS_ROUTE,
         note=(
-            "Not reachable yet. An anonymous fetch of a Facebook URL returns a login "
-            "wall, so what would be sealed is the login page rather than the content. "
-            "Reaching it needs an access route this deployment does not have — the "
-            "Meta Content Library, a licensed data provider, or authenticated "
-            "collection. That choice is open item O-03 and it is a commercial "
-            "decision, not a missing feature. This system will not attempt to "
-            "circumvent a login or a bot check (V-6)."
+            "Ready to collect, waiting on a provider. Add the pages now — they are "
+            "stored, scheduled and will start the moment a route is configured. "
+            "Facebook cannot be fetched anonymously (a login wall is what comes back, "
+            "and this system does not circumvent access controls — V-6), so it goes "
+            "through an authenticated provider instead: the Meta Content Library, or "
+            "a licensed data vendor. Set ASIP_FACEBOOK_PROVIDER once one exists. "
+            "Which route is open item O-03 — a commercial decision, and the one thing "
+            "here that code cannot supply. Before applying to the Content Library, "
+            "check whether raw posts may leave its environment: if they may not, they "
+            "cannot be sealed as evidence, and this product's central claim does not "
+            "hold for Facebook through that route."
         ),
     ),
     Platform(

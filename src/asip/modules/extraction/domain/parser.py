@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 
+from asip.modules.extraction.domain.normalised import parse_normalised_posts
 from asip.modules.extraction.domain.telegram import parse_channel
 
 #: Bumped whenever this parser's output could change for the same input.
@@ -138,6 +139,14 @@ def _read_rows(text: str, platform: str) -> list[dict[str, str]]:
     declared capability (extraction/domain/platforms.py) is what tells the user
     nothing will come of it.
     """
+    if platform == "facebook":
+        # Reads ASIP's normalised shape, not any vendor's raw response. The
+        # provider adapter normalises before anything is sealed, so this parser
+        # is unchanged when the provider changes — and a bundle from 2026 stays
+        # readable when whichever vendor produced it no longer exists
+        # (principle 8).
+        return parse_normalised_posts(text)
+
     if platform == "telegram":
         rows = parse_channel(text)
         # The telegram reader returns the same keys the collector does, so
