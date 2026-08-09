@@ -52,7 +52,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from asip.modules.collection.adapters.http_fetcher import STATUS_OK, FetchOutcome
 
@@ -128,12 +128,31 @@ class NotConfigured(RuntimeError):
     """No route exists yet. A decision, not a fault."""
 
 
+def _graph_provider() -> type:
+    """Imported on use, not at module load.
+
+    Keeps `none` — the default for every deployment without a credential —
+    from paying for a module it will not call, and keeps this file free of a
+    top-level dependency on a specific vendor.
+    """
+    from asip.modules.collection.adapters.facebook_graph import GraphApiProvider
+
+    return GraphApiProvider
+
+
 #: Providers by name. A new route is one entry and one class implementing the
 #: Protocol above — the pipeline, the extractor and the evidence path are
 #: untouched by adding one.
-PROVIDERS: dict[str, type] = {
-    NoProviderConfigured.name: NoProviderConfigured,
+#:
+#: `graph` is Facebook's own API and reads pages the token is authorised for.
+#: A licensed vendor lands here as one more entry when O-03 closes.
+PROVIDER_FACTORIES: dict[str, Any] = {
+    NoProviderConfigured.name: lambda: NoProviderConfigured,
+    "graph": _graph_provider,
 }
+
+#: Kept for callers that only need the names.
+PROVIDERS = PROVIDER_FACTORIES
 
 
 def configured_provider() -> FacebookProvider:
@@ -144,11 +163,11 @@ def configured_provider() -> FacebookProvider:
     quietly collects nothing.
     """
     name = os.environ.get(PROVIDER_ENV, NoProviderConfigured.name).strip().lower()
-    provider = PROVIDERS.get(name)
-    if provider is None:
-        known = ", ".join(sorted(PROVIDERS))
+    factory = PROVIDER_FACTORIES.get(name)
+    if factory is None:
+        known = ", ".join(sorted(PROVIDER_FACTORIES))
         raise NotConfigured(f"{PROVIDER_ENV}={name!r} is not a known provider. Known: {known}")
-    return provider()
+    return factory()()
 
 
 class FacebookAcquisition:

@@ -93,17 +93,26 @@ PLATFORMS: tuple[Platform, ...] = (
         label="Facebook — page",
         support=Support.NEEDS_ROUTE,
         note=(
-            "Ready to collect, waiting on a provider. Add the pages now — they are "
-            "stored, scheduled and will start the moment a route is configured. "
-            "Facebook cannot be fetched anonymously (a login wall is what comes back, "
-            "and this system does not circumvent access controls — V-6), so it goes "
-            "through an authenticated provider instead: the Meta Content Library, or "
-            "a licensed data vendor. Set ASIP_FACEBOOK_PROVIDER once one exists. "
-            "Which route is open item O-03 — a commercial decision, and the one thing "
-            "here that code cannot supply. Before applying to the Content Library, "
-            "check whether raw posts may leave its environment: if they may not, they "
-            "cannot be sealed as evidence, and this product's central claim does not "
-            "hold for Facebook through that route."
+            "Priority platform. The collection path is built and tested end to end; "
+            "what it needs is a credential. Add the pages now — they are stored, "
+            "scheduled, and start collecting the moment one is configured.\n\n"
+            "Working today with a token: set ASIP_FACEBOOK_PROVIDER=graph and "
+            "ASIP_FACEBOOK_TOKEN to a Page access token. That reads any page the "
+            "token is authorised for — owned, administered, or granted — which "
+            "covers watching your own pages immediately. Reading arbitrary public "
+            "pages through Graph additionally needs Page Public Content Access, "
+            "granted by App Review.\n\n"
+            "For pages that will never grant you anything — the adversarial case — "
+            "the route is a licensed data vendor or the Meta Content Library, and "
+            "which one is open item O-03: a commercial decision, the only part of "
+            "this that code cannot supply. Before applying to the Content Library, "
+            "check whether raw posts may leave its environment; if they may not, "
+            "they cannot be sealed as evidence and this product's central claim "
+            "does not hold through that route.\n\n"
+            "Anonymous fetching is not an option and never will be: Facebook returns "
+            "a login wall, and this system does not circumvent access controls (V-6). "
+            "Personal profiles are out of scope — the unit of analysis is the cluster, "
+            "never a named person (V-1)."
         ),
     ),
     Platform(
