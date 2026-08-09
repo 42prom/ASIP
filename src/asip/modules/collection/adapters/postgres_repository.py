@@ -65,6 +65,37 @@ class PostgresCollectionRepository:
                 (source_id, tenant_id),
             )
 
+    def source_id_for_url(self, tenant_id: UUID, url: str) -> UUID | None:
+        """The source already watching this page, if any.
+
+        Used before inserting so "you already watch this" is an answer rather
+        than a constraint violation. The constraint stays as the guarantee —
+        this is the courtesy in front of it.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT source_id FROM sch_collection.sources  WHERE tenant_id = %s AND url = %s",
+                (tenant_id, url),
+            )
+            row = cur.fetchone()
+        return None if row is None else UUID(str(row[0]))
+
+    def begin_observing(self, tenant_id: UUID, source_id: UUID) -> None:
+        """Start the baseline clock, once (D-31, D-80).
+
+        Deliberately only sets it when NULL. Re-adding a source — which happens
+        every time someone re-pastes a watchlist — must not restart the clock,
+        because the history is still there and D-80 gates every rule on how
+        much of it exists. Silently resetting it would push `baseline_ready`
+        thirty days further out with no visible cause.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE sch_collection.sources SET observing_since = now() "
+                " WHERE tenant_id = %s AND source_id = %s AND observing_since IS NULL",
+                (tenant_id, source_id),
+            )
+
     def set_enabled(self, tenant_id: UUID, source_id: UUID, enabled: bool) -> bool:
         """The kill switch (D-111). Returns False if there is no such source.
 
@@ -85,7 +116,8 @@ class PostgresCollectionRepository:
         with self._conn.cursor() as cur:
             cur.execute(
                 "SELECT source_id, project_id, name, url, platform, priority, enabled, "
-                "       is_canary, interval_seconds, last_attempt_at, last_success_at, "
+                "       is_canary, interval_seconds, baseline_status, observing_since, "
+                "       observed_days, last_attempt_at, last_success_at, "
                 "       consecutive_failures, last_failure_reason "
                 "  FROM sch_collection.v_sources_for_display "
                 " WHERE tenant_id = %s ORDER BY name",

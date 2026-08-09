@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid5
 
 import psycopg
 from fastapi import FastAPI, HTTPException, Request
@@ -661,6 +661,157 @@ def add_source(request: Request, payload: dict[str, Any]) -> JSONResponse:
             "warning": None if entry.support is Support.EXTRACTS else entry.note,
         }
     )
+
+
+@app.post("/api/sources/bulk")
+def add_sources_bulk(request: Request, payload: dict[str, Any]) -> JSONResponse:
+    """Add many sources at once from a pasted list.
+
+    Exists because of the thing that actually governs this phase: collection
+    has a thirty-day lead time and nothing else does (MASTER_PLAN §5.4, D-80).
+    Every day not collecting is a day added to the earliest possible demo, so
+    the path from "I know which channels matter" to "they are being watched"
+    should be one paste, not twenty form submissions.
+
+    Accepts a channel name, a t.me URL, or a full https URL, one per line —
+    because someone reading a list off a page should not have to normalise it
+    first. Blank lines and #comments are skipped so a list can be annotated.
+
+    Partial success is reported per line rather than aborting the batch. One
+    malformed entry in forty must not cost the other thirty-nine their start
+    date.
+    """
+    principal, tenant = acting(request)
+    platform_key = str(payload.get("platform", "telegram")).strip().lower()
+    raw = str(payload.get("sources", ""))
+
+    if not is_known(platform_key):
+        known = ", ".join(p.key for p in PLATFORMS)
+        raise HTTPException(status_code=400, detail=f"platform must be one of: {known}")
+
+    entry = platform(platform_key)
+    assert entry is not None
+
+    try:
+        interval = int(payload.get("interval_seconds", 3600))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="interval_seconds must be a number") from None
+    interval = max(interval, 60)
+
+    lines = [ln.strip() for ln in raw.replace(",", "\n").splitlines()]
+    wanted = [ln for ln in lines if ln and not ln.startswith("#")]
+    if not wanted:
+        raise HTTPException(status_code=400, detail="no sources given")
+
+    added: list[dict[str, str]] = []
+    rejected: list[dict[str, str]] = []
+    #: Same channel written two ways, or a list pasted with a repeat in it. The
+    #: database is idempotent about this — the id is derived from the URL — but
+    #: reporting "5 added" for 4 channels is a lie in the one number the user
+    #: reads to know what they now watch.
+    duplicates = 0
+    seen: set[UUID] = set()
+    project_id = scope_of(request, principal)
+
+    with session(tenant) as conn:
+        permit_admin(
+            principal,
+            Permission.MANAGE_PROJECTS,
+            resource_type="source",
+            resource_id=f"bulk:{len(wanted)}",
+        )
+        repository = PostgresCollectionRepository(conn)
+
+        for line in wanted:
+            try:
+                name, url = _as_source(line, platform_key)
+            except ValueError as bad:
+                rejected.append({"input": line, "reason": str(bad)})
+                continue
+
+            # Deterministic id per (platform, url): pasting the same list twice
+            # updates the same rows rather than doubling the watchlist — and,
+            # more importantly, does not reset observing_since and with it the
+            # thirty-day clock.
+            source_id = uuid5(ASIP_SOURCE_NAMESPACE, f"source|{platform_key}|{url}")
+            if source_id in seen:
+                duplicates += 1
+                continue
+            seen.add(source_id)
+
+            # Already watched, possibly under a source_id from before ids were
+            # derived from the URL. Reuse it rather than inserting a second row:
+            # a page watched twice costs double forever and gives one channel
+            # two independent baseline clocks.
+            existing = repository.source_id_for_url(tenant, url)
+            if existing is not None and existing != source_id:
+                duplicates += 1
+                repository.begin_observing(tenant, existing)
+                continue
+
+            repository.add_source(
+                source_id=source_id,
+                tenant_id=tenant,
+                project_id=project_id,
+                name=name,
+                url=url,
+                platform=platform_key,
+                interval_seconds=interval,
+            )
+            repository.begin_observing(tenant, source_id)
+            added.append({"name": name, "url": url, "source_id": str(source_id)})
+
+    return _json(
+        {
+            "ok": True,
+            "added": added,
+            "rejected": rejected,
+            "duplicates": duplicates,
+            "support": entry.support.value,
+            "note": entry.note,
+            "clock": (
+                f"{len(added)} source(s) now observing"
+                + (f" ({duplicates} duplicate line(s) ignored)" if duplicates else "")
+                + ". D-80 holds every rule until a baseline is ready — roughly thirty "
+                "days of history per source. The Sources screen shows the count as it "
+                "accumulates."
+            ),
+        }
+    )
+
+
+#: Namespace for source ids derived from a platform and URL, so re-pasting a
+#: list is idempotent and does not restart anyone's observation clock.
+ASIP_SOURCE_NAMESPACE = UUID("5b2c7e14-0000-4000-8000-a51900000006")
+
+
+def _as_source(line: str, platform_key: str) -> tuple[str, str]:
+    """Turn one pasted line into (name, url).
+
+    Telegram is normalised specially because there are four ways people write a
+    channel and only one of them is the page we can actually read: `t.me/x`
+    shows a join interstitial, `t.me/s/x` shows the posts. Silently fetching
+    the wrong one would seal an interstitial as evidence and extract nothing —
+    a failure that looks like an empty channel.
+    """
+    value = line.strip().strip("<>").rstrip("/")
+    if not value:
+        raise ValueError("empty")
+
+    if platform_key == "telegram":
+        handle = value
+        for prefix in ("https://t.me/s/", "http://t.me/s/", "https://t.me/", "http://t.me/", "@"):
+            if handle.startswith(prefix):
+                handle = handle[len(prefix) :]
+                break
+        handle = handle.split("?")[0].split("/")[0]
+        if not handle or not all(c.isalnum() or c == "_" for c in handle):
+            raise ValueError(f"not a Telegram channel name: {line!r}")
+        return (f"t.me/{handle}", f"https://t.me/s/{handle}")
+
+    if not value.startswith(("http://", "https://")):
+        raise ValueError("url must start with http:// or https://")
+    return (value.split("//", 1)[1][:60], value)
 
 
 @app.post("/api/sources/{source_id}/enabled")

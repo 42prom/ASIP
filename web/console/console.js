@@ -174,6 +174,7 @@ screens.sources = {
     const data = await api("/api/sources");
     const rows = data.sources || [];
 
+    root.append(bulkForm(data.platforms || []));
     root.append(sourceForm(data.platforms || []));
 
     root.append(el("h2", {}, "Monitored"));
@@ -184,13 +185,14 @@ screens.sources = {
     }
 
     root.append(table(
-      ["Name", "URL", "Platform", "Reads", "Every", "Enabled", "Last success", "Fails"],
+      ["Name", "URL", "Platform", "Reads", "Baseline", "Every", "Enabled", "Last success", "Fails"],
       rows, (s) => el("tr", { "data-row": "1" },
         el("td", {}, s.name),
         el("td", {}, el("a", { href: s.url, target: "_blank", rel: "noreferrer" }, s.url)),
         el("td", {}, s.platform),
         el("td", {}, el("span", { class: `support support-${s.support}`, title: s.support_note },
           SUPPORT_LABEL[s.support] || s.support)),
+        el("td", {}, baselineCell(s)),
         el("td", { class: "num" }, `${s.interval_seconds}s`),
         el("td", {}, el("button", {
           class: "link",
@@ -215,8 +217,91 @@ screens.sources = {
         `They are captured and sealed as evidence, and nothing is extracted from them. ` +
         `An empty Findings screen for these means "not read", not "nothing happening".`));
     }
+
+    // The single most misreadable state in the product's first month.
+    const young = rows.filter(
+      (s) => s.support === "extracts" && (s.observed_days ?? 0) < BASELINE_DAYS);
+    if (young.length) {
+      const most = Math.max(...young.map((s) => s.observed_days ?? 0));
+      root.append(el("p", { class: "screen-note held" },
+        `${young.length} source(s) are still building a baseline — the longest has ` +
+        `${most} of ${BASELINE_DAYS} days. Until a source is ready, D-80 holds every rule ` +
+        `against it, so an empty Findings screen right now means "not enough history yet", ` +
+        `not "nothing is happening". This is the one wait that no amount of engineering ` +
+        `shortens.`));
+    }
   },
 };
+
+/* D-31 / D-80. Roughly thirty days of history before a rule may fire against a
+   source, so the first month's honest answer is "watching, cannot tell you yet"
+   — and that has to be legible. A month of empty Findings screens read as "no
+   coordinated activity" is the D-68 failure at its most expensive: sustained,
+   confident, and wrong. */
+const BASELINE_DAYS = 30;
+
+function baselineCell(source) {
+  const days = source.observed_days ?? 0;
+  if (!source.observing_since) {
+    return el("span", { class: "support support-unknown" }, "not started");
+  }
+  if (days >= BASELINE_DAYS) {
+    return el("span", { class: "support support-extracts", title: `${days} days observed` },
+      "◆ baseline ready");
+  }
+  return el("span", {
+    class: "support support-capture_only",
+    title: "A rule cannot fire against this source until its baseline is ready (D-80).",
+  }, `· day ${days} of ${BASELINE_DAYS}`);
+}
+
+function bulkForm(platforms) {
+  const box = el("textarea", {
+    id: "bulk-list", rows: "6",
+    placeholder: "one per line — channel name, @name, or t.me link\n\ncivilgeorgia\n@some_channel\nhttps://t.me/another",
+  });
+  const select = el("select", { id: "bulk-platform" },
+    ...platforms.filter((p) => p.support === "extracts")
+      .map((p) => el("option", { value: p.key }, p.label)));
+  const result = el("p", { class: "screen-note" });
+
+  const submit = async (event) => {
+    event.preventDefault();
+    result.className = "screen-note";
+    result.textContent = "adding…";
+    try {
+      const r = await api("/api/sources/bulk", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sources: box.value, platform: select.value, interval_seconds: 3600 }),
+      });
+      result.className = r.rejected.length ? "screen-note held" : "screen-note ok";
+      result.textContent =
+        `${r.added.length} added. ${r.clock}` +
+        (r.rejected.length
+          ? `  Rejected ${r.rejected.length}: ` +
+            r.rejected.map((x) => `${x.input} (${x.reason})`).join("; ")
+          : "");
+      box.value = "";
+      setTimeout(() => go("sources"), 2500);
+    } catch (error) {
+      result.className = "screen-note held";
+      result.textContent = error.message;
+    }
+  };
+
+  return el("div", {},
+    el("h2", {}, "Start watching a list"),
+    el("p", { class: "screen-note" },
+      "Paste the channels you want monitored. Collection has a thirty-day lead time and " +
+      "nothing else does — every day not collecting is a day added to the earliest " +
+      "possible answer, so start with the ones you are sure about and add more later. " +
+      "Re-pasting the same list is safe: it will not restart anyone's clock."),
+    el("form", { class: "source-form bulk", onsubmit: submit },
+      el("label", { for: "bulk-platform" }, "Platform"), select,
+      el("label", { for: "bulk-list" }, "Channels"), box,
+      el("button", { type: "submit" }, "Start watching")),
+    result);
+}
 
 function sourceForm(platforms) {
   const name = el("input", { type: "text", id: "src-name", placeholder: "Ministry press page" });
