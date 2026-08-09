@@ -83,27 +83,53 @@ def test_no_blocked_platform_promises_a_workaround() -> None:
             )
 
 
-def test_exactly_the_platforms_the_parser_can_read_are_marked_extracts() -> None:
-    """The claim, checked against the parser rather than against intent.
-
-    A page is genuinely extractable only if `parse_capture` finds items in it.
-    Any platform marked EXTRACTS must have a shape the parser handles; a
-    platform the parser cannot read must not be marked EXTRACTS.
-    """
-    canary_page = (
+#: A page each fully-read platform must actually parse. The registry cannot be
+#: satisfied by editing a list — a claim requires a sample the parser handles.
+PROOF: dict[str, bytes] = {
+    "canary": (
         b'<div data-asip-item="a1" data-asip-author="alpha" '
         b'data-asip-posted-at="2026-08-04T09:12:04Z">first</div>'
-    )
+    ),
+    "telegram": (
+        b'<div class="tgme_widget_message" data-post="somechannel/7">'
+        b'<a class="tgme_widget_message_owner_name">Some Channel</a>'
+        b'<div class="tgme_widget_message_text">a post</div>'
+        b'<time datetime="2026-08-04T09:12:04+00:00">09:12</time></div>'
+    ),
+}
 
-    parsed = parse_capture(canary_page, minimum_expected_items=1)
-    assert parsed.items, "the canary shape no longer parses — the registry is now wrong"
 
-    claimed = {p.key for p in PLATFORMS if p.support is Support.EXTRACTS}
-    assert claimed == {"canary"}, (
-        f"{sorted(claimed)} are marked as fully read. Only 'canary' has an extractor. "
-        "A platform is added to EXTRACTS when its golden fixtures pass, not when "
-        "work on it begins (D-88.1)."
-    )
+def test_every_platform_claiming_to_be_read_actually_parses() -> None:
+    """The claim, checked against the parser rather than against intent.
+
+    Written so that adding a platform to EXTRACTS *without* a working parser
+    fails here. A hardcoded expected set would not do that — it could be
+    satisfied by editing the set, which is precisely the change someone makes
+    when they want the platform to look supported.
+    """
+    claimed = sorted(p.key for p in PLATFORMS if p.support is Support.EXTRACTS)
+    assert claimed, "no platform is claimed to be readable, which cannot be right"
+
+    for key in claimed:
+        assert key in PROOF, (
+            f"{key!r} is marked as fully read but has no sample page here. A platform "
+            "joins EXTRACTS when its golden fixtures pass, not when work begins (D-88.1)."
+        )
+        result = parse_capture(PROOF[key], minimum_expected_items=1, platform=key)
+        assert result.items, f"{key!r} claims to be fully read and parsed nothing"
+        assert result.validation_passed, f"{key!r}: {result.problems}"
+
+
+def test_a_platform_that_cannot_be_read_does_not_claim_to_be() -> None:
+    """The other direction. A blocked platform whose sample happened to parse
+    would mean the registry is understating what works, which is safer but
+    still wrong — and it would hide a finished extractor from users."""
+    for entry in PLATFORMS:
+        if entry.support is Support.EXTRACTS:
+            continue
+        assert entry.key not in PROOF, (
+            f"{entry.key!r} has a parseable sample but is not marked as fully read"
+        )
 
 
 def test_a_platform_marked_extracts_is_never_also_described_as_unreachable() -> None:

@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 
+from asip.modules.extraction.domain.telegram import parse_channel
+
 #: Bumped whenever this parser's output could change for the same input.
 #: Reprocessing compares this against the stored value to decide what to redo.
 #:
@@ -127,13 +129,45 @@ class _ItemCollector(HTMLParser):
             self._current["text"] += data
 
 
-def parse_capture(html: bytes, minimum_expected_items: int = 1) -> ExtractionResult:
+def _read_rows(text: str, platform: str) -> list[dict[str, str]]:
+    """Pick the DOM reader for a platform.
+
+    An unknown platform falls back to the canary shape rather than raising. A
+    capture is already stored by the time this runs; refusing to parse it would
+    turn a configuration mistake into a lost extraction, and the source's
+    declared capability (extraction/domain/platforms.py) is what tells the user
+    nothing will come of it.
+    """
+    if platform == "telegram":
+        rows = parse_channel(text)
+        # The telegram reader returns the same keys the collector does, so
+        # everything downstream is identical. Asserted rather than assumed:
+        # a shape mismatch here would surface as "missing id or author" on
+        # every item, which reads as a broken page rather than a broken parser.
+        return rows
+
+    collector = _ItemCollector()
+    collector.feed(text)
+    collector.close()
+    return collector.rows
+
+
+def parse_capture(
+    html: bytes, minimum_expected_items: int = 1, platform: str = "canary"
+) -> ExtractionResult:
     """Parse a stored capture into items.
 
     ``minimum_expected_items`` drives the validation rule: a page that suddenly
     yields far fewer items than usual has probably changed shape, and silently
     extracting three posts from a page that used to give forty is how a
     detection system quietly stops working (D-87).
+
+    ``platform`` selects the DOM reader. Only the *shape* differs per platform —
+    timestamp parsing, precision detection, script detection and whitespace
+    normalisation stay here, shared, because two sources that derived "the same
+    second" differently would make cross-source clustering meaningless. That is
+    the whole signal this product looks for, so it is not a place to allow
+    per-platform drift.
     """
     problems: list[str] = []
 
@@ -143,12 +177,10 @@ def parse_capture(html: bytes, minimum_expected_items: int = 1) -> ExtractionRes
         text = html.decode("utf-8", errors="replace")
         problems.append("capture was not valid UTF-8; decoded with replacement")
 
-    collector = _ItemCollector()
-    collector.feed(text)
-    collector.close()
+    rows = _read_rows(text, platform)
 
     items: list[ExtractedItem] = []
-    for row in collector.rows:
+    for row in rows:
         if not row["external_id"] or not row["author"]:
             problems.append(f"item missing id or author: {row['external_id']!r}")
             continue
@@ -186,6 +218,37 @@ def parse_capture(html: bytes, minimum_expected_items: int = 1) -> ExtractionRes
     )
 
 
+def _precision_of(value: str) -> str:
+    """How precise the source's own timestamp is, ignoring any zone suffix.
+
+    THE BUG THIS FIXES
+
+    Precision was measured from the whole string's length. That works for the
+    canary's "2026-08-04T09:12:04" and breaks on anything carrying an offset:
+    Telegram publishes "2026-04-09T07:01:44+00:00", which is 25 characters, is
+    in no row of the table, and therefore fell through to the default.
+
+    The default is "second". So an offset-bearing minute-precision timestamp —
+    "2026-04-09T07:01+00:00" — would have been recorded as second precision.
+    That is the dangerous direction: overstating precision makes a 120-second
+    clustering window look meaningful when every value in it is rounded to the
+    minute, and the resulting "burst" is an artefact of rounding (D-102).
+
+    Stripping the zone first measures the part that actually carries precision.
+    """
+    body = value.rstrip("Z")
+    # Split off "+HH:MM" / "-HH:MM" without touching the date's own hyphens:
+    # a sign can only be a zone marker after the time component begins.
+    time_at = body.find("T")
+    if time_at != -1:
+        for sign in ("+", "-"):
+            at = body.find(sign, time_at)
+            if at != -1:
+                body = body[:at]
+                break
+    return PRECISION_BY_LENGTH.get(len(body), "second")
+
+
 def _parse_timestamp(raw: str) -> tuple[datetime | None, str]:
     """Derive the authoritative UTC time and record the precision offered.
 
@@ -198,7 +261,7 @@ def _parse_timestamp(raw: str) -> tuple[datetime | None, str]:
     if not value:
         return (None, "second")
 
-    precision = PRECISION_BY_LENGTH.get(len(value.rstrip("Z")), "second")
+    precision = _precision_of(value)
 
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))

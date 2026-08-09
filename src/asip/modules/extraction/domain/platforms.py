@@ -114,12 +114,16 @@ PLATFORMS: tuple[Platform, ...] = (
     ),
     Platform(
         key="telegram",
-        label="Telegram (public channel)",
-        support=Support.BLOCKED,
+        label="Telegram — public channel",
+        support=Support.EXTRACTS,
         note=(
-            "Not reachable yet, but the closest to feasible: public channels have a "
-            "web preview and there is an official Bot API. Needs an extractor and a "
-            "decision on which route to use (O-03)."
+            "Fully read. Give the channel's public preview URL — https://t.me/s/CHANNEL — "
+            "and posts, authors and second-precision timestamps are extracted. No login, "
+            "no API key: this is the page Telegram itself serves publicly for the channel. "
+            "One channel alone will not produce a finding, because one author is not a "
+            "cluster; add several and the detector looks for them posting within seconds "
+            "of each other, which is what coordinated amplification looks like from "
+            "outside."
         ),
     ),
 )

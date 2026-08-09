@@ -33,6 +33,7 @@ from asip.modules.detection.domain.burst import (
     Observation,
     find_bursts,
 )
+from asip.modules.evidence.adapters.postgres_repository import PostgresEvidenceRepository
 from asip.modules.evidence.application.write_bundle import WriteBundle
 from asip.modules.export.adapters.postgres_repository import PostgresExportRepository
 from asip.modules.export.application.export_finding import ExportFinding
@@ -72,6 +73,21 @@ class StageResult:
     status: str
     detail: str
     counts: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
+class _Harvest:
+    """What one sweep collected for one project.
+
+    Bundles are carried alongside the sources because a finding must name the
+    evidence it rests on (V-5), and a finding that spans four channels rests on
+    all four captures — not on whichever one happened to be processed last.
+    """
+
+    source_ids: list[UUID] = field(default_factory=list)
+    #: capture_id -> bundle_id, so a finding can cite the bundles its own
+    #: clustered items came from rather than every bundle in the sweep.
+    bundles: dict[UUID, UUID] = field(default_factory=dict)
 
 
 @dataclass
@@ -148,12 +164,35 @@ class Pipeline:
             return run
         run.record("schedule", "ok", f"{len(due)} source(s) due.", due=len(due))
 
+        # Collect first, detect after.
+        #
+        # Detection used to run inside the per-source loop, which meant it could
+        # only ever see one source's items. That was invisible with a single
+        # canary and became obvious with the first real platform: a Telegram
+        # channel is exactly one author, the burst rule needs three, so no
+        # per-source run could fire however many channels were configured.
+        #
+        # Coordination is a property of a group and the group spans sources. So
+        # the sweep finishes, and then each project is examined as a whole.
+        collected: dict[UUID, _Harvest] = {}
         for source in due:
-            self._run_source(run, source, trace_id)
+            harvested = self._run_source(run, source, trace_id)
+            if harvested is None:
+                continue
+            project_id = source["project_id"]
+            bucket = collected.setdefault(project_id, _Harvest())
+            bucket.source_ids.append(source["source_id"])
+            capture_id, bundle_id = harvested
+            bucket.bundles[capture_id] = bundle_id
+
+        for project_id, harvest in collected.items():
+            self._detect_and_export(run, project_id, harvest, trace_id)
 
         return run
 
-    def _run_source(self, run: PipelineRun, source: dict[str, Any], trace_id: str) -> None:
+    def _run_source(
+        self, run: PipelineRun, source: dict[str, Any], trace_id: str
+    ) -> tuple[UUID, UUID] | None:
         source_id = source["source_id"]
         job_id = uuid.uuid4()
         started = datetime.now(UTC)
@@ -176,7 +215,10 @@ class Pipeline:
                 "failed",
                 f"{source['name']}: {outcome.status} — {outcome.failure_reason}",
             )
-            return
+            # No bundle, so this source contributes nothing to the sweep. The
+            # other sources still get detected on: one unreachable channel must
+            # not blind the project to what the rest of them did.
+            return None
 
         run.record(
             "fetch",
@@ -224,7 +266,10 @@ class Pipeline:
         )
 
         # ── extract ─────────────────────────────────────────────────────────
-        result = parse_capture(body, minimum_expected_items=1)
+        # The source declares which DOM reader applies. A capture parsed by the
+        # wrong reader yields zero items and validates as "page changed shape",
+        # which reads as the site breaking rather than as us misconfiguring it.
+        result = parse_capture(body, minimum_expected_items=1, platform=source["platform"])
         platform = source["platform"]
         for item in result.items:
             account_id = account_id_for(platform, item.author_handle)
@@ -270,9 +315,77 @@ class Pipeline:
             + ("validation passed" if result.validation_passed else "; ".join(result.problems)),
             items=len(result.items),
         )
+        return (capture_id, bundle_id)
 
-        # ── detect ──────────────────────────────────────────────────────────
-        rows = self._extraction.observations_for_detection(self._tenant, source_id)
+    def _evidence_for(
+        self, capture_ids: tuple[UUID, ...], harvest: _Harvest, live_captures: list[UUID]
+    ) -> list[UUID]:
+        """The bundles a cluster's own items came from (V-5).
+
+        Most captures are in this sweep's harvest and resolve for free. Some are
+        not: detection reads all stored content for the project, so a cluster
+        can legitimately span a post captured yesterday and one captured just
+        now. Those older captures are looked up rather than dropped — a finding
+        that silently omitted half its evidence would be defensible only for the
+        half it kept.
+
+        Never returns empty for a real cluster: a finding with no evidence
+        cannot be written (V-5), and if this somehow found nothing the CHECK
+        constraint refuses the row rather than storing an undefendable one.
+        """
+        # `capture_ids` carries one entry PER ITEM, not per capture — five posts
+        # from one page are five identical ids. Deduplicated here, because an
+        # evidence array listing the same bundle five times says a finding rests
+        # on five things when it rests on one, and that is an overstatement in
+        # the one field a recipient is meant to check.
+        distinct: list[UUID] = []
+        for capture_id in capture_ids:
+            if capture_id not in distinct:
+                distinct.append(capture_id)
+
+        # A cluster's items point at the capture that FIRST saw them, which is
+        # the provenance claim and is frozen. That capture may be gone —
+        # retention expires captures while content outlives them (D-54). So each
+        # is tried, then the most recent capture containing the same item, which
+        # is the one likeliest to still exist.
+        candidates: list[UUID] = list(distinct)
+        candidates.extend(c for c in live_captures if c not in candidates)
+
+        resolved = {c: harvest.bundles[c] for c in candidates if c in harvest.bundles}
+        missing = [c for c in candidates if c not in resolved]
+        if missing:
+            resolved.update(
+                PostgresEvidenceRepository(self._conn).bundles_for_captures(self._tenant, missing)
+            )
+
+        # First-seen order, so two runs over the same cluster produce the same
+        # list rather than one that depends on dict iteration (M-10). Deduped
+        # again by bundle: two captures of the same page can be sealed into one.
+        bundles: list[UUID] = []
+        for capture_id in candidates:
+            bundle_id = resolved.get(capture_id)
+            if bundle_id is not None and bundle_id not in bundles:
+                bundles.append(bundle_id)
+        return bundles
+
+    def _detect_and_export(
+        self, run: PipelineRun, project_id: UUID, harvest: _Harvest, trace_id: str
+    ) -> None:
+        """Look for coordination across everything this project collected.
+
+        Across sources, not within one. That is the whole point: a channel
+        posting twenty times is busy, and four channels posting inside forty
+        seconds is the observation.
+        """
+        rows = self._extraction.observations_for_sources(self._tenant, harvest.source_ids)
+        # The most recent capture containing each ITEM (D-24), keyed by item.
+        # Per item, not per project: a project-wide list would offer every
+        # capture in the sweep as a fallback, and a cluster would end up citing
+        # bundles belonging to channels it has nothing to do with — which is the
+        # over-claiming this whole path exists to avoid.
+        live_capture_of = {
+            r["content_id"]: r["last_capture_id"] for r in rows if r.get("last_capture_id")
+        }
         observations = [
             Observation(
                 content_id=row["content_id"],
@@ -286,26 +399,54 @@ class Pipeline:
         clusters = find_bursts(observations, BurstRuleParams())
 
         if not clusters:
+            # Says how wide the search actually was. "No burst in 43
+            # observations" from one source and from four sources mean very
+            # different things, and an operator cannot tell them apart from a
+            # count alone (D-68).
+            accounts = len({o.account_id for o in observations})
             run.record(
                 "detect",
                 "idle",
-                f"No burst in {len(observations)} observation(s) — the rule did not fire.",
+                f"No burst across {len(harvest.source_ids)} source(s): "
+                f"{len(observations)} observation(s) from {accounts} account(s) — "
+                "the rule did not fire.",
                 observations=len(observations),
+                accounts=accounts,
             )
             return
 
+        source_id = harvest.source_ids[0]
         finding_ids = []
+        unevidenced = 0
         for cluster in clusters:
+            fallback = [live_capture_of[c] for c in cluster.content_ids if c in live_capture_of]
+            evidence = self._evidence_for(cluster.capture_ids, harvest, fallback)
+            if not evidence:
+                # V-5, enforced before the CHECK constraint rather than by it.
+                # Reaching the constraint aborts the whole run and loses every
+                # other cluster in it; the honest outcome is to skip this one
+                # and say so. A finding nobody can evidence must not exist, and
+                # its absence must not be silent (D-68).
+                unevidenced += 1
+                continue
+
             finding_id = uuid.uuid4()
             finding_ids.append(finding_id)
             self._detection.record_finding(
                 finding_id=finding_id,
                 tenant_id=self._tenant,
                 rule_id=BURST_RULE_ID,
+                # One source id on a finding that may span several. Kept
+                # because the column is NOT NULL and a cross-source finding
+                # still came from somewhere; the honest answer is the full set,
+                # and that needs a finding_sources table. Recorded as open
+                # rather than papered over — the evidence refs below already
+                # name every capture involved, so nothing is lost, but this
+                # column now understates what a finding covers.
                 source_id=source_id,
-                # D-49. Inherited from the source rather than decided here: a
-                # rule has no idea what a project is, and it should not learn.
-                project_id=source["project_id"],
+                # D-49. From the project this sweep examined, not from a rule:
+                # a rule has no idea what a project is and should not learn.
+                project_id=project_id,
                 trace_id=trace_id,
                 window_start=cluster.window_start,
                 window_end=cluster.window_end,
@@ -321,8 +462,11 @@ class Pipeline:
                     }
                     for s in cluster.signals
                 ],
-                # V-5: the bundle this rests on. Never empty.
-                evidence_refs=[bundle_id],
+                # V-5: the bundles THIS cluster's items came from. Not every
+                # bundle in the sweep — an evidence set padded with unrelated
+                # captures cannot be checked by a recipient, and a claim that
+                # does not hold up discredits the ones that do.
+                evidence_refs=evidence,
                 # The rule has no measured precision, so every finding it makes
                 # is a shadow finding and is labelled as one everywhere it
                 # appears (V-4).
@@ -330,11 +474,17 @@ class Pipeline:
                 accounts=list(cluster.accounts),
             )
         self._conn.commit()
+        skipped = (
+            f" {unevidenced} cluster(s) skipped: no surviving evidence bundle, so V-5 "
+            "refuses to record them as findings."
+            if unevidenced
+            else ""
+        )
         run.record(
             "detect",
-            "ok",
-            f"{len(clusters)} shadow finding(s) — the rule has no measured precision, "
-            "so these are observations, not verdicts.",
+            "degraded" if unevidenced else "ok",
+            f"{len(finding_ids)} shadow finding(s) — the rule has no measured precision, "
+            "so these are observations, not verdicts." + skipped,
             findings=len(clusters),
         )
 

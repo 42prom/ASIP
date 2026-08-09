@@ -1,0 +1,107 @@
+<!--
+  Golden fixture — Telegram public channel preview.
+
+  SYNTHETIC, and deliberately so. R-03: a real capture contains real people's
+  names, photographs and posts, which makes it T3 and keeps it out of this
+  repository entirely. The DOM shape below is copied from a live t.me/s/ page;
+  every channel, message and timestamp in it is invented.
+
+  It encodes the signal the product exists to find: four DIFFERENT channels
+  posting near-identical content inside 41 seconds. One channel posting twenty
+  times is a busy channel. Four channels posting the same thing at 09:12 is the
+  observation — and it is a statement about the group, never about whoever runs
+  any one of them (V-1).
+
+  The fifth entry is eleven minutes later and belongs to no burst. It is here so
+  a test can prove the window actually excludes something, rather than passing
+  because everything happened to be inside it.
+-->
+<div class="tgme_channel_history js-message_history">
+
+  <div class="tgme_widget_message text_not_supported_wrap js-widget_message"
+       data-post="civicvoice_ge/1041">
+    <div class="tgme_widget_message_bubble">
+      <a class="tgme_widget_message_owner_name" href="https://t.me/civicvoice_ge">
+        <span dir="auto">Civic Voice</span>
+      </a>
+      <div class="tgme_widget_message_text js-message_text" dir="auto">
+        ხიდის პროექტის ვადები ისევ გადაიწია — მესამედ წელიწადში.
+      </div>
+      <div class="tgme_widget_message_footer compact js-message_footer">
+        <span class="tgme_widget_message_meta">
+          <time datetime="2026-08-04T09:12:04+00:00" class="time">09:12</time>
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <div class="tgme_widget_message text_not_supported_wrap js-widget_message"
+       data-post="regionwatch/882">
+    <div class="tgme_widget_message_bubble">
+      <a class="tgme_widget_message_owner_name" href="https://t.me/regionwatch">
+        <span dir="auto">Region Watch</span>
+      </a>
+      <div class="tgme_widget_message_text js-message_text" dir="auto">
+        The bridge timeline has slipped <b>again</b> — third time this year.
+      </div>
+      <div class="tgme_widget_message_footer compact js-message_footer">
+        <span class="tgme_widget_message_meta">
+          <time datetime="2026-08-04T09:12:19+00:00" class="time">09:12</time>
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <div class="tgme_widget_message text_not_supported_wrap js-widget_message"
+       data-post="dailybrief_ge/2210">
+    <div class="tgme_widget_message_bubble">
+      <a class="tgme_widget_message_owner_name" href="https://t.me/dailybrief_ge">
+        <span dir="auto">Daily Brief</span>
+      </a>
+      <div class="tgme_widget_message_text js-message_text" dir="auto">
+        Bridge timeline slipped again. Third time this year.
+        <a href="https://example.org/bridge">Read more</a>
+      </div>
+      <div class="tgme_widget_message_footer compact js-message_footer">
+        <span class="tgme_widget_message_meta">
+          <time datetime="2026-08-04T09:12:31+00:00" class="time">09:12</time>
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <div class="tgme_widget_message text_not_supported_wrap js-widget_message"
+       data-post="northsignal/77">
+    <div class="tgme_widget_message_bubble">
+      <a class="tgme_widget_message_owner_name" href="https://t.me/northsignal">
+        <span dir="auto">North Signal</span>
+      </a>
+      <div class="tgme_widget_message_text js-message_text" dir="auto">
+        Third slip this year on the bridge timeline.
+      </div>
+      <div class="tgme_widget_message_footer compact js-message_footer">
+        <span class="tgme_widget_message_meta">
+          <time datetime="2026-08-04T09:12:45+00:00" class="time">09:12</time>
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <div class="tgme_widget_message text_not_supported_wrap js-widget_message"
+       data-post="civicvoice_ge/1042">
+    <div class="tgme_widget_message_bubble">
+      <a class="tgme_widget_message_owner_name" href="https://t.me/civicvoice_ge">
+        <span dir="auto">Civic Voice</span>
+      </a>
+      <div class="tgme_widget_message_text js-message_text" dir="auto">
+        Unrelated post, well outside the window.
+      </div>
+      <div class="tgme_widget_message_footer compact js-message_footer">
+        <span class="tgme_widget_message_meta">
+          <time datetime="2026-08-04T09:23:58+00:00" class="time">09:23</time>
+        </span>
+      </div>
+    </div>
+  </div>
+
+</div>

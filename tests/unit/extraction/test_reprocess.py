@@ -53,7 +53,13 @@ class FakeRepo:
     def reprocessing_backlog(self, tenant_id: UUID, current: int) -> list[dict[str, object]]:
         if self._stored_version >= current:
             return []
-        return [{"capture_id": CAPTURE, "oldest_extractor_version": self._stored_version}]
+        return [
+            {
+                "capture_id": CAPTURE,
+                "platform": "canary",
+                "oldest_extractor_version": self._stored_version,
+            }
+        ]
 
     def content_for_capture(self, tenant_id: UUID, capture_id: UUID) -> list[dict[str, object]]:
         posted = datetime(2026, 8, 4, 9, 12, 4, tzinfo=UTC)

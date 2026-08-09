@@ -82,7 +82,7 @@ class ReprocessCaptures:
         self._captures = captures
         self._repository = repository
 
-    def execute(self, tenant_id: UUID, platform: str = "canary") -> ReprocessReport:
+    def execute(self, tenant_id: UUID) -> ReprocessReport:
         report = ReprocessReport()
 
         backlog = self._repository.reprocessing_backlog(  # type: ignore[attr-defined]
@@ -101,7 +101,17 @@ class ReprocessCaptures:
                 report.captures_unavailable += 1
                 continue
 
-            result = parse_capture(raw, minimum_expected_items=1)
+            # Per capture, from the backlog, not a parameter. The argument this
+            # replaced defaulted to "canary" and was never passed, so a Telegram
+            # capture would have been re-parsed by the canary reader: zero
+            # items, reported as "the page changed shape". D-13 exists so old
+            # captures stay re-readable, and that would have blanked them.
+            #
+            # The same value keys the content id below (M-10). Reading it twice
+            # from different places is how a re-parse produces ids that do not
+            # match the rows it is supposed to update.
+            platform = str(entry.get("platform") or "canary")
+            result = parse_capture(raw, minimum_expected_items=1, platform=platform)
             report.problems.extend(result.problems)
 
             stored = {

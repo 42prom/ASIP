@@ -163,6 +163,39 @@ class PostgresExtractionRepository:
             columns = [d[0] for d in cur.description or ()]
             return [dict(zip(columns, row, strict=True)) for row in cur.fetchall()]
 
+    def observations_for_sources(
+        self, tenant_id: UUID, source_ids: list[UUID]
+    ) -> list[dict[str, Any]]:
+        """Behavioural columns across several sources at once — V-2 still holds.
+
+        WHY THIS EXISTS AND THE PER-SOURCE VERSION IS NOT ENOUGH
+
+        Coordination is a property of a GROUP, and the group is rarely inside
+        one source. A single Telegram channel posting twenty times is a busy
+        channel; four channels posting the same thing within forty seconds is
+        the observation the product exists to make. Detection scoped to one
+        source can never see the second one — the first real platform made that
+        obvious, because each channel is exactly one author and the rule needs
+        three.
+
+        Sources are passed in rather than looked up: which sources belong to a
+        project is collection's business, and content has no project column
+        (D-93).
+        """
+        if not source_ids:
+            return []
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT content_id, account_id, capture_id, last_capture_id, "
+                "       posted_at_authoritative, timestamp_precision "
+                "  FROM sch_extraction.v_content_for_detection "
+                " WHERE tenant_id = %s AND source_id = ANY(%s) "
+                " ORDER BY posted_at_authoritative",
+                (tenant_id, source_ids),
+            )
+            columns = [d[0] for d in cur.description or ()]
+            return [dict(zip(columns, row, strict=True)) for row in cur.fetchall()]
+
     def recent_content(self, tenant_id: UUID, limit: int = 100) -> list[dict[str, Any]]:
         """For the console. Includes text, which is fine — this is not the
         authenticity path, it is a human reading what was captured."""
@@ -194,7 +227,7 @@ class PostgresExtractionRepository:
         """
         with self._conn.cursor() as cur:
             cur.execute(
-                "SELECT capture_id, oldest_extractor_version, items "
+                "SELECT capture_id, platform, oldest_extractor_version, items "
                 "  FROM sch_extraction.v_reprocessing_backlog "
                 " WHERE tenant_id = %s AND oldest_extractor_version < %s "
                 " ORDER BY capture_id",

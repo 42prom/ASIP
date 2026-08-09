@@ -214,6 +214,29 @@ class PostgresEvidenceRepository:
             )
             return tuple(_row_to_chain_entry(row) for row in cur.fetchall())
 
+    def bundles_for_captures(self, tenant_id: UUID, capture_ids: list[UUID]) -> dict[UUID, UUID]:
+        """Which bundle sealed each of these captures.
+
+        Exists so a finding can cite the evidence it ACTUALLY rests on. A
+        cross-source finding knows which captures its clustered items came
+        from; without this it would have to cite every bundle produced by the
+        sweep, including captures from channels that had nothing to do with it.
+
+        Over-citing is worse than under-citing. An evidence set that includes
+        unrelated captures cannot be checked by a recipient — every extra
+        bundle is a claim that does not hold up, and one that does not hold up
+        discredits the ones that do (V-5).
+        """
+        if not capture_ids:
+            return {}
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT capture_id, bundle_id FROM sch_evidence.evidence_bundles "
+                " WHERE tenant_id = %s AND capture_id = ANY(%s)",
+                (tenant_id, capture_ids),
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
+
     def load_bundle(self, tenant_id: UUID, bundle_id: UUID) -> StoredBundle | None:
         with self._conn.cursor() as cur:
             cur.execute(
