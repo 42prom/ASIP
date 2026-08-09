@@ -25,6 +25,7 @@ import psycopg
 
 from asip.contracts.evidence import Artifact, ArtifactKind, BundleDraft, RenderParams
 from asip.entrypoints.exporting import assemble
+from asip.modules.baseline.domain.readiness import assess
 from asip.modules.collection.adapters.http_fetcher import HttpFetcher
 from asip.modules.collection.adapters.postgres_repository import PostgresCollectionRepository
 from asip.modules.detection.adapters.postgres_repository import PostgresDetectionRepository
@@ -399,6 +400,31 @@ class Pipeline:
         posting twenty times is busy, and four channels posting inside forty
         seconds is the observation.
         """
+        # ── D-80: may anything fire here at all? ────────────────────────────
+        #
+        # Checked before the rule runs, not after. Nothing is an anomaly until
+        # the norm is known (D-31), and a rule firing on a source's second
+        # capture is the product making claims it has no grounds for.
+        #
+        # This was previously unenforced — the burst rule fired from the first
+        # sweep. It is the difference between "we measured and this is unusual"
+        # and "we have seen two days and this looks like a lot".
+        window = self._collection.observation_window(self._tenant, harvest.source_ids)
+        readiness = assess(
+            observed_days=window["observed_days"],
+            window_days=window["window_days"],
+            last_collected_at=window["last_collected_at"],
+            now=datetime.now(UTC),
+        )
+        if not readiness.may_fire:
+            run.record(
+                "detect",
+                "idle",
+                f"Baseline {readiness.status.value}: {readiness.reason}",
+                observed_days=readiness.observed_days,
+            )
+            return
+
         rows = self._extraction.observations_for_sources(self._tenant, harvest.source_ids)
         # The most recent capture containing each ITEM (D-24), keyed by item.
         # Per item, not per project: a project-wide list would offer every

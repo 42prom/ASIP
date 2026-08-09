@@ -111,6 +111,37 @@ class PostgresCollectionRepository:
             )
             return cur.rowcount > 0
 
+    def observation_window(self, tenant_id: UUID, source_ids: list[UUID]) -> dict[str, Any]:
+        """How much of the period was actually collected, across these sources.
+
+        Distinct days with a SUCCESSFUL fetch, not days since somebody added
+        the source. A source failing silently for a fortnight would otherwise
+        reach its thirty-day anniversary and be treated as having thirty days
+        of history (D-31, D-80).
+
+        Computed from fetch_jobs rather than stored, because a stored counter
+        drifts: it is written by the code whose correctness it is supposed to
+        attest to, and a bug that skips collection also skips the increment.
+        """
+        if not source_ids:
+            return {"observed_days": 0, "window_days": 0, "last_collected_at": None}
+
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(DISTINCT date(started_at)) AS observed_days, "
+                "       greatest(1, (date(max(started_at)) - date(min(started_at))) + 1) "
+                "         AS window_days, "
+                "       max(started_at) AS last_collected_at "
+                "  FROM sch_collection.fetch_jobs "
+                " WHERE tenant_id = %s AND source_id = ANY(%s) AND status = 'succeeded'",
+                (tenant_id, source_ids),
+            )
+            row = cur.fetchone()
+
+        if row is None or row[0] == 0:
+            return {"observed_days": 0, "window_days": 0, "last_collected_at": None}
+        return {"observed_days": row[0], "window_days": row[1], "last_collected_at": row[2]}
+
     def list_sources(self, tenant_id: UUID) -> list[dict[str, Any]]:
         """Read through the published view, not the tables (D-92)."""
         with self._conn.cursor() as cur:
